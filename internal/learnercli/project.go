@@ -1,0 +1,209 @@
+package learnercli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type PracticumCatalog struct {
+	Practicums []Practicum `json:"practicums"`
+}
+
+type Practicum struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	CanSkipEntry bool   `json:"can_skip_entry"`
+	// Introduction and Lessons are public catalog content that the CLI does not
+	// use when downloading a starter. Keep their shape opaque while preserving
+	// strict validation of the surrounding API response.
+	Introduction    json.RawMessage `json:"introduction"`
+	FirstAssignment struct {
+		ID               string `json:"id"`
+		Title            string `json:"title"`
+		Version          int    `json:"version"`
+		EstimatedMinutes int    `json:"estimated_minutes"`
+		LearnerSurface   string `json:"learner_surface"`
+	} `json:"first_assignment"`
+	Workspace *struct {
+		ID             string    `json:"id"`
+		ProjectID      string    `json:"project_id"`
+		State          string    `json:"state"`
+		BaseRevisionID *string   `json:"base_revision_id"`
+		SupportMode    *string   `json:"support_mode"`
+		CreatedAt      time.Time `json:"created_at"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	} `json:"workspace"`
+	CurrentAssignment *struct {
+		ID      string `json:"id"`
+		Title   string `json:"title"`
+		Version int    `json:"version"`
+		State   string `json:"state"`
+	} `json:"current_assignment"`
+	Lessons json.RawMessage `json:"lessons"`
+}
+
+const projectLinkRelativePath = ".softpractice/project.json"
+
+var projectIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+type ProjectLink struct {
+	SchemaVersion     int    `json:"schema_version"`
+	WorkspaceID       string `json:"workspace_id"`
+	ProjectID         string `json:"project_id"`
+	AssignmentID      string `json:"assignment_id,omitempty"`
+	AssignmentVersion int    `json:"assignment_version,omitempty"`
+}
+
+func LoadProjectLink(repositoryRoot string) (ProjectLink, error) {
+	path := filepath.Join(repositoryRoot, projectLinkRelativePath)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ProjectLink{}, fmt.Errorf(
+				"%s is missing; download the project linked to your workspace",
+				projectLinkRelativePath,
+			)
+		}
+		return ProjectLink{}, fmt.Errorf("inspect project link: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return ProjectLink{}, errors.New(".softpractice/project.json must be a regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ProjectLink{}, fmt.Errorf("read project link: %w", err)
+	}
+	var link ProjectLink
+	if err := decodeSingleJSON(data, &link); err != nil {
+		return ProjectLink{}, fmt.Errorf("decode project link: %w", err)
+	}
+	workspaceID, err := uuid.Parse(link.WorkspaceID)
+	if err != nil || workspaceID.String() != link.WorkspaceID {
+		return ProjectLink{}, errors.New("project link workspace_id must be a canonical UUID")
+	}
+	if !projectIDPattern.MatchString(link.ProjectID) {
+		return ProjectLink{}, errors.New("project link project_id is invalid")
+	}
+	switch link.SchemaVersion {
+	case 1:
+		if link.AssignmentID != "" || link.AssignmentVersion != 0 {
+			return ProjectLink{}, errors.New("project link v1 must not pin an assignment")
+		}
+	case 2:
+		if !projectIDPattern.MatchString(link.AssignmentID) || link.AssignmentVersion < 1 {
+			return ProjectLink{}, errors.New("project link v2 assignment pin is invalid")
+		}
+	default:
+		return ProjectLink{}, errors.New("project link schema_version is invalid")
+	}
+	return link, nil
+}
+
+type WorkspaceStatus struct {
+	Workspace struct {
+		ID             string    `json:"id"`
+		ProjectID      string    `json:"project_id"`
+		State          string    `json:"state"`
+		BaseRevisionID *string   `json:"base_revision_id"`
+		SupportMode    *string   `json:"support_mode"`
+		CreatedAt      time.Time `json:"created_at"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	} `json:"workspace"`
+	Assignment struct {
+		ID      string `json:"id"`
+		Version int    `json:"version"`
+		Title   string `json:"title"`
+		State   string `json:"state"`
+	} `json:"assignment"`
+	LatestSubmission *struct {
+		ID          string    `json:"id"`
+		RevisionID  string    `json:"revision_id"`
+		JobState    string    `json:"job_state"`
+		SubmittedAt time.Time `json:"submitted_at"`
+	} `json:"latest_submission"`
+}
+
+type CourseUpdate struct {
+	Ref                   string `json:"ref"`
+	FromAssignmentID      string `json:"from_assignment_id"`
+	FromAssignmentVersion int    `json:"from_assignment_version"`
+	ToAssignmentID        string `json:"to_assignment_id"`
+	ToAssignmentVersion   int    `json:"to_assignment_version"`
+	BaseRevisionID        string `json:"base_revision_id"`
+	BaseContentSHA256     string `json:"base_content_sha256"`
+	ArchiveSHA256         string `json:"archive_sha256"`
+	ArchiveSize           int64  `json:"archive_size"`
+	Files                 []struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	} `json:"files"`
+	Operations []struct {
+		Kind string `json:"kind"`
+		Path string `json:"path"`
+	} `json:"operations"`
+}
+
+func (c *Client) PrepareCourseUpdate(ctx context.Context, workspaceID string) (CourseUpdate, error) {
+	var update CourseUpdate
+	if err := c.AuthorizedJSON(ctx, "POST", "/v1/workspaces/"+workspaceID+"/current-assignment/course-update", nil, &update); err != nil {
+		return CourseUpdate{}, err
+	}
+	return update, nil
+}
+
+func (c *Client) GetLinkedWorkspace(
+	ctx context.Context,
+	link ProjectLink,
+) (WorkspaceStatus, error) {
+	var status WorkspaceStatus
+	if err := c.AuthorizedJSON(
+		ctx,
+		"GET",
+		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment",
+		nil,
+		&status,
+	); err != nil {
+		return WorkspaceStatus{}, err
+	}
+	if status.Workspace.ID != link.WorkspaceID || status.Workspace.ProjectID != link.ProjectID {
+		return WorkspaceStatus{}, errors.New(
+			"local project link does not match the server workspace; download the project again",
+		)
+	}
+	return status, nil
+}
+
+// StartedPracticum returns the learner's started practicum. When practicumID is
+// supplied, it disambiguates accounts that have more than one active practicum.
+func (c *Client) StartedPracticum(ctx context.Context, practicumID string) (Practicum, error) {
+	var catalog PracticumCatalog
+	if err := c.AuthorizedJSON(ctx, "GET", "/v1/practicums", nil, &catalog); err != nil {
+		return Practicum{}, err
+	}
+	var started *Practicum
+	for index := range catalog.Practicums {
+		practicum := &catalog.Practicums[index]
+		if practicum.Workspace == nil || (practicumID != "" && practicum.ID != practicumID) {
+			continue
+		}
+		if started != nil {
+			return Practicum{}, errors.New("multiple started practicums found; run softpractice starter --practicum PRACTICUM_ID")
+		}
+		started = practicum
+	}
+	if started == nil {
+		if practicumID != "" {
+			return Practicum{}, fmt.Errorf("practicum %q is not started; start it in the web app first", practicumID)
+		}
+		return Practicum{}, errors.New("start a practicum in the web app before downloading its project")
+	}
+	return *started, nil
+}
