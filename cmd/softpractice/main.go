@@ -165,6 +165,8 @@ func run(
 		return status(ctx, client, "", remaining[1:], output, errorOutput)
 	case "submission":
 		return submissionCommand(ctx, client, "", remaining[1:], output, errorOutput)
+	case "project":
+		return projectCommand(ctx, client, remaining[1:], output, errorOutput)
 	case "starter":
 		return downloadStarter(ctx, client, remaining[1:], output, errorOutput)
 	case "update":
@@ -176,6 +178,145 @@ func run(
 	default:
 		return fmt.Errorf(text(ctx, "неизвестная команда %q", "unknown command %q"), remaining[0])
 	}
+}
+
+func projectCommand(
+	ctx context.Context,
+	client *learnercli.Client,
+	args []string,
+	output, errorOutput io.Writer,
+) error {
+	if len(args) == 0 || args[0] != "restore" {
+		return errors.New(text(ctx,
+			"использование: softpractice project restore [--practicum ID] [--directory PATH]",
+			"usage: softpractice project restore [--practicum ID] [--directory PATH]"))
+	}
+	flags := flag.NewFlagSet("project restore", flag.ContinueOnError)
+	flags.SetOutput(errorOutput)
+	practicumID := flags.String("practicum", "", "started practicum ID")
+	directory := flags.String("directory", "", "new destination directory")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New(text(ctx,
+			"использование: softpractice project restore [--practicum ID] [--directory PATH]",
+			"usage: softpractice project restore [--practicum ID] [--directory PATH]"))
+	}
+	source, err := client.ResolveProjectRestoreSource(ctx, strings.TrimSpace(*practicumID))
+	if err != nil {
+		return fmt.Errorf(text(ctx, "подготовить восстановление проекта: %w", "prepare project restore: %w"), err)
+	}
+	target := strings.TrimSpace(*directory)
+	if target == "" {
+		target = source.ProjectID
+	}
+	if source.Kind == "starter" {
+		if err := downloadStarterInto(
+			ctx,
+			client,
+			source.WorkspaceID,
+			source.ProjectID,
+			source.AssignmentID,
+			source.AssignmentVersion,
+			target,
+		); err != nil {
+			return err
+		}
+	} else if source.Kind == "revision" {
+		if err := restoreRevisionProject(ctx, client, source, target); err != nil {
+			return err
+		}
+	} else {
+		return errors.New("project restore source is invalid")
+	}
+	absoluteTarget, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(output, text(ctx,
+		"Связанный проект восстановлен: %s\n",
+		"Linked project restored: %s\n"), absoluteTarget)
+	fmt.Fprintln(output, text(ctx,
+		"Проверьте `softpractice status` и продолжайте работу в этой папке.",
+		"Run `softpractice status`, then continue working in this directory."))
+	return nil
+}
+
+func restoreRevisionProject(
+	ctx context.Context,
+	client *learnercli.Client,
+	source learnercli.ProjectRestoreSource,
+	target string,
+) error {
+	target, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return fmt.Errorf("destination %s already exists; choose a new directory", target)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect destination: %w", err)
+	}
+	parent := filepath.Dir(target)
+	archive, err := os.CreateTemp("", "softpractice-project-restore-*.zip")
+	if err != nil {
+		return fmt.Errorf("create revision download: %w", err)
+	}
+	archivePath := archive.Name()
+	defer os.Remove(archivePath)
+	_, downloadErr := client.DownloadRevisionArchive(
+		ctx,
+		"/v1/submissions/"+source.SubmissionID+"/revision/archive",
+		archive,
+	)
+	closeErr := archive.Close()
+	if downloadErr != nil || closeErr != nil {
+		return fmt.Errorf("download project revision: %w", errors.Join(downloadErr, closeErr))
+	}
+	materialized, err := submission.MaterializeZIP(
+		archivePath,
+		parent,
+		submission.DefaultArchiveLimits(),
+	)
+	if err != nil {
+		return fmt.Errorf("verify project revision: %w", err)
+	}
+	stage := materialized.Path
+	defer os.RemoveAll(stage)
+	link := learnercli.ProjectLink{
+		SchemaVersion:     2,
+		WorkspaceID:       source.WorkspaceID,
+		ProjectID:         source.ProjectID,
+		AssignmentID:      source.AssignmentID,
+		AssignmentVersion: source.AssignmentVersion,
+	}
+	if err := initializeLinkedGit(ctx, stage, link, "Restore Softpractice submission"); err != nil {
+		return err
+	}
+	if source.NeedsCourseUpdate {
+		if err := updateLinkedProject(
+			ctx,
+			client,
+			stage,
+			source.ExpectedBaseRevisionID,
+			io.Discard,
+		); err != nil {
+			return fmt.Errorf("update restored accepted revision: %w", err)
+		}
+	}
+	repository, finalLink, workspace, err := linkedWorkspace(ctx, client, stage, false)
+	if err != nil {
+		return fmt.Errorf("verify restored project: %w", err)
+	}
+	if !repository.Clean || finalLink.AssignmentID != workspace.Assignment.ID ||
+		finalLink.AssignmentVersion != workspace.Assignment.Version {
+		return errors.New("restored project does not match the current workspace assignment")
+	}
+	if err := os.Rename(stage, target); err != nil {
+		return fmt.Errorf("place restored project: %w", err)
+	}
+	return nil
 }
 
 func showConfig(ctx context.Context, output io.Writer) error {
@@ -320,6 +461,15 @@ func downloadStarter(ctx context.Context, client *learnercli.Client, args []stri
 }
 
 func initializeStarterGit(ctx context.Context, root string, link learnercli.ProjectLink) error {
+	return initializeLinkedGit(ctx, root, link, "Initial Softpractice starter")
+}
+
+func initializeLinkedGit(
+	ctx context.Context,
+	root string,
+	link learnercli.ProjectLink,
+	commitMessage string,
+) error {
 	if output, err := exec.CommandContext(ctx, "git", "-C", root, "init", "--initial-branch=main").CombinedOutput(); err != nil {
 		return fmt.Errorf("initialize local Git repository: %v: %s", err, output)
 	}
@@ -351,7 +501,7 @@ func initializeStarterGit(ctx context.Context, root string, link learnercli.Proj
 	}
 	if output, err := exec.CommandContext(ctx, "git", "-C", root,
 		"-c", "user.name=Softpractice", "-c", "user.email=starter@softpractice.invalid",
-		"commit", "--no-verify", "-m", "Initial Softpractice starter").CombinedOutput(); err != nil {
+		"commit", "--no-verify", "-m", commitMessage).CombinedOutput(); err != nil {
 		return fmt.Errorf("commit starter baseline: %v: %s", err, output)
 	}
 	return nil
@@ -369,7 +519,17 @@ func updateProject(ctx context.Context, client *learnercli.Client, args []string
 	if flags.NArg() != 0 {
 		return errors.New(text(ctx, "использование: softpractice update", "usage: softpractice update"))
 	}
-	repository, link, workspace, err := linkedWorkspace(ctx, client, "", true)
+	return updateLinkedProject(ctx, client, "", "", output)
+}
+
+func updateLinkedProject(
+	ctx context.Context,
+	client *learnercli.Client,
+	startDirectory string,
+	expectedBaseRevisionID string,
+	output io.Writer,
+) error {
+	repository, link, workspace, err := linkedWorkspace(ctx, client, startDirectory, true)
 	if err != nil {
 		return err
 	}
@@ -390,6 +550,9 @@ func updateProject(ctx context.Context, client *learnercli.Client, args []string
 	if (link.SchemaVersion == 2 && (update.FromAssignmentID != link.AssignmentID || update.FromAssignmentVersion != link.AssignmentVersion)) ||
 		update.ToAssignmentID != workspace.Assignment.ID || update.ToAssignmentVersion != workspace.Assignment.Version {
 		return errors.New(text(ctx, "сервер вернул обновление для другого урока; проект не изменён", "server returned a course update for a different lesson; project was left unchanged"))
+	}
+	if expectedBaseRevisionID != "" && update.BaseRevisionID != expectedBaseRevisionID {
+		return errors.New("workspace base revision changed while restoring the project; retry")
 	}
 	normalized, err := submission.NormalizeTarGz(repository.ArchivePath, os.TempDir(), submission.DefaultArchiveLimits())
 	if err != nil {

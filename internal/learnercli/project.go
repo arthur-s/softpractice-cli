@@ -14,17 +14,19 @@ import (
 )
 
 type PracticumCatalog struct {
-	Practicums []Practicum `json:"practicums"`
+	Practicums         []Practicum     `json:"practicums"`
+	UpcomingPracticums json.RawMessage `json:"upcoming_practicums"`
 }
 
 type Practicum struct {
 	ID           string `json:"id"`
 	Title        string `json:"title"`
 	CanSkipEntry bool   `json:"can_skip_entry"`
-	// Introduction and Lessons are public catalog content that the CLI does not
-	// use when downloading a starter. Keep their shape opaque while preserving
-	// strict validation of the surrounding API response.
+	// Introduction and Lessons are evolving public catalog content. Keep their
+	// full shape opaque; project restore decodes only the stable route fields it
+	// needs after the surrounding response passes strict validation.
 	Introduction    json.RawMessage `json:"introduction"`
+	Completion      json.RawMessage `json:"completion"`
 	FirstAssignment struct {
 		ID               string `json:"id"`
 		Title            string `json:"title"`
@@ -48,6 +50,27 @@ type Practicum struct {
 		State   string `json:"state"`
 	} `json:"current_assignment"`
 	Lessons json.RawMessage `json:"lessons"`
+}
+
+// ProjectRestoreSource describes the public learner state needed to recreate
+// one linked local project. Revision sources may require the single published
+// course update from the accepted predecessor to the current assignment.
+type ProjectRestoreSource struct {
+	Kind                   string
+	WorkspaceID            string
+	ProjectID              string
+	AssignmentID           string
+	AssignmentVersion      int
+	SubmissionID           string
+	ExpectedBaseRevisionID string
+	NeedsCourseUpdate      bool
+}
+
+type practicumRestoreLesson struct {
+	ID                 string  `json:"id"`
+	Version            int     `json:"version"`
+	State              string  `json:"state"`
+	ResultSubmissionID *string `json:"result_submission_id"`
 }
 
 const projectLinkRelativePath = ".softpractice/project.json"
@@ -163,20 +186,37 @@ func (c *Client) GetLinkedWorkspace(
 	ctx context.Context,
 	link ProjectLink,
 ) (WorkspaceStatus, error) {
-	var status WorkspaceStatus
-	if err := c.AuthorizedJSON(
-		ctx,
-		"GET",
-		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment",
-		nil,
-		&status,
-	); err != nil {
+	status, err := c.GetWorkspaceStatus(ctx, link.WorkspaceID)
+	if err != nil {
 		return WorkspaceStatus{}, err
 	}
 	if status.Workspace.ID != link.WorkspaceID || status.Workspace.ProjectID != link.ProjectID {
 		return WorkspaceStatus{}, errors.New(
 			"local project link does not match the server workspace; download the project again",
 		)
+	}
+	return status, nil
+}
+
+// GetWorkspaceStatus returns the current public projection for an owned
+// workspace without requiring a local project link first.
+func (c *Client) GetWorkspaceStatus(ctx context.Context, workspaceID string) (WorkspaceStatus, error) {
+	parsed, err := uuid.Parse(workspaceID)
+	if err != nil || parsed.String() != workspaceID {
+		return WorkspaceStatus{}, errors.New("workspace ID must be a canonical UUID")
+	}
+	var status WorkspaceStatus
+	if err := c.AuthorizedJSON(
+		ctx,
+		"GET",
+		"/v1/workspaces/"+workspaceID+"/current-assignment",
+		nil,
+		&status,
+	); err != nil {
+		return WorkspaceStatus{}, err
+	}
+	if status.Workspace.ID != workspaceID {
+		return WorkspaceStatus{}, errors.New("workspace response identity does not match the request")
 	}
 	return status, nil
 }
@@ -206,4 +246,106 @@ func (c *Client) StartedPracticum(ctx context.Context, practicumID string) (Prac
 		return Practicum{}, errors.New("start a practicum in the web app before downloading its project")
 	}
 	return *started, nil
+}
+
+// ResolveProjectRestoreSource chooses the newest public learner revision that
+// can safely seed a linked local project. With no submission history it falls
+// back to the current published starter. When the current lesson has no
+// submission yet, it restores the accepted predecessor and requires the
+// ordinary authorized course update.
+func (c *Client) ResolveProjectRestoreSource(
+	ctx context.Context,
+	practicumID string,
+) (ProjectRestoreSource, error) {
+	practicum, err := c.StartedPracticum(ctx, practicumID)
+	if err != nil {
+		return ProjectRestoreSource{}, err
+	}
+	if practicum.Workspace == nil || practicum.CurrentAssignment == nil {
+		return ProjectRestoreSource{}, errors.New("started practicum has no current project")
+	}
+	workspaceID := practicum.Workspace.ID
+	status, err := c.GetWorkspaceStatus(ctx, workspaceID)
+	if err != nil {
+		return ProjectRestoreSource{}, err
+	}
+	if status.Workspace.ProjectID != practicum.ID ||
+		status.Assignment.ID != practicum.CurrentAssignment.ID ||
+		status.Assignment.Version != practicum.CurrentAssignment.Version {
+		return ProjectRestoreSource{}, errors.New("practicum progress changed while preparing the restore; retry")
+	}
+	base := ProjectRestoreSource{
+		WorkspaceID:       workspaceID,
+		ProjectID:         practicum.ID,
+		AssignmentID:      status.Assignment.ID,
+		AssignmentVersion: status.Assignment.Version,
+	}
+	if status.LatestSubmission != nil {
+		if err := validateCanonicalUUID(status.LatestSubmission.ID, "submission"); err != nil {
+			return ProjectRestoreSource{}, err
+		}
+		if err := validateCanonicalUUID(status.LatestSubmission.RevisionID, "revision"); err != nil {
+			return ProjectRestoreSource{}, err
+		}
+		base.Kind = "revision"
+		base.SubmissionID = status.LatestSubmission.ID
+		return base, nil
+	}
+	if practicum.Workspace.BaseRevisionID == nil {
+		base.Kind = "starter"
+		return base, nil
+	}
+	if err := validateCanonicalUUID(*practicum.Workspace.BaseRevisionID, "base revision"); err != nil {
+		return ProjectRestoreSource{}, err
+	}
+	lessons, err := decodeRestoreLessons(practicum.Lessons)
+	if err != nil {
+		return ProjectRestoreSource{}, err
+	}
+	currentIndex := -1
+	for index, lesson := range lessons {
+		if lesson.ID == status.Assignment.ID && lesson.Version == status.Assignment.Version {
+			currentIndex = index
+			break
+		}
+	}
+	if currentIndex < 0 {
+		return ProjectRestoreSource{}, errors.New("current assignment is absent from the practicum route")
+	}
+	for index := currentIndex - 1; index >= 0; index-- {
+		lesson := lessons[index]
+		if lesson.State != "accepted" || lesson.ResultSubmissionID == nil {
+			continue
+		}
+		if !projectIDPattern.MatchString(lesson.ID) || lesson.Version < 1 {
+			return ProjectRestoreSource{}, errors.New("accepted practicum lesson is invalid")
+		}
+		if err := validateCanonicalUUID(*lesson.ResultSubmissionID, "submission"); err != nil {
+			return ProjectRestoreSource{}, err
+		}
+		base.Kind = "revision"
+		base.AssignmentID = lesson.ID
+		base.AssignmentVersion = lesson.Version
+		base.SubmissionID = *lesson.ResultSubmissionID
+		base.ExpectedBaseRevisionID = *practicum.Workspace.BaseRevisionID
+		base.NeedsCourseUpdate = true
+		return base, nil
+	}
+	return ProjectRestoreSource{}, errors.New("accepted base submission is unavailable for project restore")
+}
+
+func decodeRestoreLessons(raw json.RawMessage) ([]practicumRestoreLesson, error) {
+	var lessons []practicumRestoreLesson
+	if err := json.Unmarshal(raw, &lessons); err != nil || len(lessons) == 0 {
+		return nil, errors.New("practicum lesson route is invalid")
+	}
+	return lessons, nil
+}
+
+func validateCanonicalUUID(value, label string) error {
+	parsed, err := uuid.Parse(value)
+	if err != nil || parsed.String() != value {
+		return fmt.Errorf("%s ID must be a canonical UUID", label)
+	}
+	return nil
 }

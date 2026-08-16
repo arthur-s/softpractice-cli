@@ -403,6 +403,12 @@ type CourseUpdateArchive struct {
 	BaseContentSHA256 string
 }
 
+// RevisionArchive describes a ZIP containing one learner-owned immutable
+// submission revision.
+type RevisionArchive struct {
+	Size int64
+}
+
 // DownloadStarter streams an authenticated starter bundle to destination and
 // validates the delivery metadata before callers unpack it.
 func (c *Client) DownloadStarter(ctx context.Context, path string, destination io.Writer) (StarterArchive, error) {
@@ -507,6 +513,58 @@ func (c *Client) downloadCourseUpdateOnce(ctx context.Context, token, path strin
 		BaseRevisionID:    response.Header.Get("X-Softpractice-Course-Update-Base-Revision-ID"),
 		BaseContentSHA256: response.Header.Get("X-Softpractice-Course-Update-Base-Content-SHA256"),
 	}, nil
+}
+
+// DownloadRevisionArchive streams one learner-owned submission revision as a
+// ZIP. The archive is deliberately opaque to the client: the server keeps the
+// object-storage details and evaluator-only data out of this public response.
+func (c *Client) DownloadRevisionArchive(ctx context.Context, path string, destination io.Writer) (RevisionArchive, error) {
+	credentials, err := c.validCredentials(ctx)
+	if err != nil {
+		return RevisionArchive{}, err
+	}
+	archive, err := c.downloadRevisionArchiveOnce(ctx, credentials.AccessToken, path, destination)
+	var statusError *HTTPError
+	if !errors.As(err, &statusError) || statusError.Status != http.StatusUnauthorized {
+		return archive, err
+	}
+	credentials, err = c.refresh(ctx, credentials)
+	if err != nil {
+		return RevisionArchive{}, err
+	}
+	return c.downloadRevisionArchiveOnce(ctx, credentials.AccessToken, path, destination)
+}
+
+func (c *Client) downloadRevisionArchiveOnce(ctx context.Context, token, path string, destination io.Writer) (RevisionArchive, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	if err != nil {
+		return RevisionArchive{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return RevisionArchive{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+		if readErr != nil {
+			return RevisionArchive{}, readErr
+		}
+		return RevisionArchive{}, parseHTTPError(response.StatusCode, body)
+	}
+	if response.Header.Get("Content-Type") != "application/zip" {
+		return RevisionArchive{}, errors.New("revision response has an unexpected Content-Type")
+	}
+	size, err := strconv.ParseInt(response.Header.Get("Content-Length"), 10, 64)
+	if err != nil || size < 1 || size > 10<<20 {
+		return RevisionArchive{}, errors.New("revision response has an invalid Content-Length")
+	}
+	written, err := io.Copy(destination, io.LimitReader(response.Body, size+1))
+	if err != nil || written != size {
+		return RevisionArchive{}, errors.New("revision download was incomplete")
+	}
+	return RevisionArchive{Size: size}, nil
 }
 
 func (e *HTTPError) Error() string {

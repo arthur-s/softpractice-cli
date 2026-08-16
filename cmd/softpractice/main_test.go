@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -24,6 +25,76 @@ import (
 	"github.com/arthur-s/softpractice-cli/internal/starterbundle"
 	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
+
+func TestRestoreRevisionProjectCreatesCurrentLinkedGitProject(t *testing.T) {
+	workspaceID := uuid.NewString()
+	submissionID := uuid.NewString()
+	revisionID := uuid.NewString()
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	file, err := zipWriter.Create("app.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("print('restored')\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" {
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+			return
+		}
+		switch request.URL.Path {
+		case "/v1/submissions/" + submissionID + "/revision/archive":
+			writer.Header().Set("Content-Type", "application/zip")
+			writer.Header().Set("Content-Length", fmt.Sprint(archive.Len()))
+			_, _ = writer.Write(archive.Bytes())
+		case "/v1/workspaces/" + workspaceID + "/current-assignment":
+			writeTestJSON(writer, map[string]any{
+				"workspace": map[string]any{
+					"id": workspaceID, "project_id": "equipment-rental-python",
+					"state": "active", "base_revision_id": nil, "support_mode": nil,
+					"created_at": time.Now(), "updated_at": time.Now(),
+				},
+				"assignment": map[string]any{
+					"id": "pa-foundation-02", "version": 1,
+					"title": "Rental period", "state": "available",
+				},
+				"latest_submission": map[string]any{
+					"id": submissionID, "revision_id": revisionID,
+					"job_state": "completed", "submitted_at": time.Now(),
+				},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	target := filepath.Join(t.TempDir(), "restored-project")
+	source := learnercli.ProjectRestoreSource{
+		Kind: "revision", WorkspaceID: workspaceID, ProjectID: "equipment-rental-python",
+		AssignmentID: "pa-foundation-02", AssignmentVersion: 1,
+		SubmissionID: submissionID,
+	}
+	if err := restoreRevisionProject(context.Background(), client, source, target); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(target, "app.py"))
+	if err != nil || string(content) != "print('restored')\n" {
+		t.Fatalf("restored content = %q, %v", content, err)
+	}
+	link, err := learnercli.LoadProjectLink(target)
+	if err != nil || link.WorkspaceID != workspaceID || link.AssignmentID != "pa-foundation-02" {
+		t.Fatalf("restored link = %+v, %v", link, err)
+	}
+	if output, err := exec.Command("git", "-C", target, "status", "--porcelain").CombinedOutput(); err != nil || len(output) != 0 {
+		t.Fatalf("restored git status = %q, %v", output, err)
+	}
+}
 
 func TestRunRequiresKnownCommand(t *testing.T) {
 	var output, errorsOutput bytes.Buffer
@@ -352,6 +423,49 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	}
 	if strings.TrimSpace(openOutput.String()) != "https://app.example/submissions/"+submissionID+"/result" {
 		t.Fatalf("open output = %q", openOutput.String())
+	}
+}
+
+func TestSubmissionDownloadCommandSavesOwnedRevisionArchive(t *testing.T) {
+	submissionID := uuid.NewString()
+	contents := []byte("PK\\x03\\x04immutable revision")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" {
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+			return
+		}
+		if request.URL.Path != "/v1/submissions/"+submissionID+"/revision/archive" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/zip")
+		writer.Header().Set("Content-Length", fmt.Sprint(len(contents)))
+		_, _ = writer.Write(contents)
+	}))
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	target := filepath.Join(t.TempDir(), "accepted-project.zip")
+	var output, errorOutput bytes.Buffer
+	if err := downloadSubmissionRevision(
+		context.Background(), client,
+		[]string{"--id", submissionID, "--output", target},
+		&output, &errorOutput,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, contents) {
+		t.Fatalf("downloaded archive = %q, %v", got, err)
+	}
+	if !strings.Contains(output.String(), "Project saved") {
+		t.Fatalf("output = %q", output.String())
+	}
+	if err := downloadSubmissionRevision(
+		context.Background(), client,
+		[]string{"--id", submissionID, "--output", target},
+		io.Discard, &errorOutput,
+	); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("overwrite error = %v", err)
 	}
 }
 

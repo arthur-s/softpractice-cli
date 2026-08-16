@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -186,14 +188,31 @@ func submissionCommand(
 	args []string,
 	output, errorOutput io.Writer,
 ) error {
-	if len(args) == 0 || args[0] != "show" {
-		return errors.New("usage: softpractice submission show [--id ID] [--format text|json|json-v2]")
+	if len(args) == 0 {
+		return errors.New("usage: softpractice submission show|download ...")
 	}
+	switch args[0] {
+	case "show":
+		return showSubmission(ctx, client, startDirectory, args[1:], output, errorOutput)
+	case "download":
+		return downloadSubmissionRevision(ctx, client, args[1:], output, errorOutput)
+	default:
+		return errors.New("usage: softpractice submission show|download ...")
+	}
+}
+
+func showSubmission(
+	ctx context.Context,
+	client *learnercli.Client,
+	startDirectory string,
+	args []string,
+	output, errorOutput io.Writer,
+) error {
 	flags := flag.NewFlagSet("submission show", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	id := flags.String("id", "", "submission ID; defaults to the latest linked submission")
 	format := flags.String("format", "text", "output format: text, json, or json-v2")
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -252,6 +271,65 @@ func submissionCommand(
 	if payload.Evaluation != nil {
 		fmt.Fprintf(output, text(ctx, "Результат: %s\n", "Result: %s\n"), payload.Evaluation.Status)
 	}
+	return nil
+}
+
+func downloadSubmissionRevision(
+	ctx context.Context,
+	client *learnercli.Client,
+	args []string,
+	output, errorOutput io.Writer,
+) error {
+	flags := flag.NewFlagSet("submission download", flag.ContinueOnError)
+	flags.SetOutput(errorOutput)
+	id := flags.String("id", "", "accepted submission ID from the result page")
+	destination := flags.String("output", "", "destination ZIP path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*id) == "" {
+		return errors.New(text(ctx,
+			"использование: softpractice submission download --id ID [--output PATH]",
+			"usage: softpractice submission download --id ID [--output PATH]"))
+	}
+	submissionID := strings.TrimSpace(*id)
+	parsedID, err := uuid.Parse(submissionID)
+	if err != nil || parsedID.String() != submissionID {
+		return errors.New(text(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID"))
+	}
+	target := strings.TrimSpace(*destination)
+	if target == "" {
+		target = "softpractice-" + submissionID + ".zip"
+	}
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	archive, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf(text(ctx,
+				"файл %s уже существует; выберите другой путь", "destination %s already exists; choose another path"), target)
+		}
+		return fmt.Errorf(text(ctx, "создать %s: %w", "create %s: %w"), target, err)
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			_ = os.Remove(target)
+		}
+	}()
+	result, downloadErr := client.DownloadRevisionArchive(
+		ctx,
+		"/v1/submissions/"+submissionID+"/revision/archive",
+		archive,
+	)
+	closeErr := archive.Close()
+	if downloadErr != nil || closeErr != nil {
+		return fmt.Errorf(text(ctx, "скачать проект: %w", "download project: %w"), errors.Join(downloadErr, closeErr))
+	}
+	completed = true
+	fmt.Fprintf(output, text(ctx, "Проект сохранён: %s (%s)\n", "Project saved: %s (%s)\n"), target, formatBytes(result.Size))
 	return nil
 }
 
