@@ -758,6 +758,7 @@ func applyCourseUpdateWithFilesystem(
 	mkdirAll func(*os.Root, string, os.FileMode) error,
 ) (err error) {
 	type replacedFile struct {
+		path string
 		data []byte
 		mode os.FileMode
 	}
@@ -794,19 +795,27 @@ func applyCourseUpdateWithFilesystem(
 			return fmt.Errorf("course update can delete only the existing regular file %q", operation.Path)
 		}
 	}
-	replaced := make(map[string]replacedFile)
+	// Порядок отката зеркалит канонический builder: добавленное снимается в
+	// обратном порядке, затем восстанавливается заменённое и удалённое, затем
+	// исчезают созданные каталоги. Map дал бы недетерминированный обход, и две
+	// половины одного контракта разошлись бы там, где conformance-векторы
+	// как раз и обязаны их удерживать вместе.
+	var replaced []replacedFile
 	var added, createdDirs []string
 	defer func() {
 		if err == nil {
 			return
 		}
 		var rollbackErrors []error
-		for _, path := range added {
+		for index := len(added) - 1; index >= 0; index-- {
+			path := added[index]
 			if rollbackErr := projectRoot.Remove(filepath.FromSlash(path)); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove added course update file %s: %w", path, rollbackErr))
 			}
 		}
-		for path, prior := range replaced {
+		for index := len(replaced) - 1; index >= 0; index-- {
+			prior := replaced[index]
+			path := prior.path
 			name := filepath.FromSlash(path)
 			if rollbackErr := projectRoot.WriteFile(name, prior.data, prior.mode.Perm()); rollbackErr != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore course update file %s: %w", path, rollbackErr))
@@ -850,7 +859,7 @@ func applyCourseUpdateWithFilesystem(
 			if readErr != nil {
 				return readErr
 			}
-			replaced[operation.Path] = replacedFile{data: prior, mode: info.Mode()}
+			replaced = append(replaced, replacedFile{path: operation.Path, data: prior, mode: info.Mode()})
 			if removeErr := projectRoot.Remove(name); removeErr != nil {
 				return removeErr
 			}
@@ -869,7 +878,7 @@ func applyCourseUpdateWithFilesystem(
 			if readErr != nil {
 				return readErr
 			}
-			replaced[operation.Path] = replacedFile{data: prior, mode: info.Mode()}
+			replaced = append(replaced, replacedFile{path: operation.Path, data: prior, mode: info.Mode()})
 		} else {
 			missingDirs, err := missingCourseUpdateDirectories(projectRoot, filepath.Dir(name))
 			if err != nil {
