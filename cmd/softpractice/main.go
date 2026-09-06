@@ -567,8 +567,8 @@ func updateLinkedProject(
 	}
 	fmt.Fprintf(output, text(ctx, "Проект курса обновлён в этой папке: %s\n", "Course project updated in place: %s\n"), repository.Root)
 	fmt.Fprintln(output, text(ctx,
-		"Принятая предыдущая ревизия осталась в истории Git. Посмотрите новые файлы урока и продолжайте с `softpractice submit`.",
-		"The accepted previous revision remains in Git history. Inspect the new lesson files, then continue with `softpractice submit`."))
+		"Принятая предыдущая ревизия осталась в истории Git. Просмотрите изменения урока и продолжайте с `softpractice submit`.",
+		"The accepted previous revision remains in Git history. Review the lesson changes, then continue with `softpractice submit`."))
 	return nil
 }
 
@@ -619,7 +619,7 @@ func downloadAndApplyCourseUpdate(
 	if !clean {
 		return errors.New("working tree changed while the course update was downloading; review and commit or stash those changes before retrying")
 	}
-	if err := applyCourseUpdate(repositoryRoot, stage, update); err != nil {
+	if err := applyCourseUpdate(ctx, repositoryRoot, stage, update); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(stage); err != nil {
@@ -654,7 +654,13 @@ func verifyCourseUpdateFiles(stage string, update learnercli.CourseUpdate) error
 		if !safeProjectRelativePath(file.Path) || len(file.SHA256) != 64 {
 			return errors.New("prepared course update has an invalid file manifest")
 		}
+		if _, duplicate := expected[file.Path]; duplicate {
+			return errors.New("prepared course update repeats a file manifest entry")
+		}
 		expected[file.Path] = file.SHA256
+	}
+	if err := verifyCourseUpdateOperations(update, expected); err != nil {
+		return err
 	}
 	actual := make(map[string]struct{}, len(expected))
 	err := filepath.WalkDir(stage, func(path string, entry os.DirEntry, walkErr error) error {
@@ -696,61 +702,243 @@ func verifyCourseUpdateFiles(stage string, update learnercli.CourseUpdate) error
 	return nil
 }
 
-func applyCourseUpdate(repositoryRoot, stage string, update learnercli.CourseUpdate) (err error) {
-	type replacedFile struct {
-		data []byte
-		mode os.FileMode
-	}
-	replaced := make(map[string]replacedFile)
-	var added []string
-	defer func() {
-		if err == nil {
-			return
-		}
-		for _, path := range added {
-			_ = os.Remove(filepath.Join(repositoryRoot, filepath.FromSlash(path)))
-		}
-		for path, prior := range replaced {
-			_ = os.WriteFile(filepath.Join(repositoryRoot, filepath.FromSlash(path)), prior.data, prior.mode)
-		}
-	}()
+func verifyCourseUpdateOperations(update learnercli.CourseUpdate, expected map[string]string) error {
+	seen := make(map[string]struct{}, len(update.Operations))
 	for _, operation := range update.Operations {
-		if operation.Kind != "add" && operation.Kind != "replace" {
+		if operation.Kind != "add" && operation.Kind != "replace" && operation.Kind != "delete" {
 			return errors.New("prepared course update has an unsupported operation")
 		}
 		if !safeProjectRelativePath(operation.Path) {
 			return errors.New("prepared course update has an unsafe path")
 		}
-		source := filepath.Join(stage, filepath.FromSlash(operation.Path))
-		destination := filepath.Join(repositoryRoot, filepath.FromSlash(operation.Path))
-		info, statErr := os.Lstat(destination)
+		if _, duplicate := seen[operation.Path]; duplicate {
+			return errors.New("prepared course update repeats an operation")
+		}
+		_, hasPayload := expected[operation.Path]
+		if operation.Kind == "delete" && hasPayload {
+			return errors.New("prepared course update delete operation has a manifest entry")
+		}
+		if operation.Kind != "delete" && !hasPayload {
+			return errors.New("prepared course update operation has no manifest entry")
+		}
+		seen[operation.Path] = struct{}{}
+	}
+	for path := range expected {
+		if _, found := seen[path]; !found {
+			return errors.New("prepared course update manifest file has no operation")
+		}
+	}
+	return nil
+}
+
+func applyCourseUpdate(ctx context.Context, repositoryRoot, stage string, update learnercli.CourseUpdate) (err error) {
+	return applyCourseUpdateWithWriter(ctx, repositoryRoot, stage, update,
+		func(root *os.Root, relative string, data []byte, mode os.FileMode) error {
+			return root.WriteFile(filepath.FromSlash(relative), data, mode)
+		})
+}
+
+func applyCourseUpdateWithWriter(
+	ctx context.Context,
+	repositoryRoot, stage string,
+	update learnercli.CourseUpdate,
+	writeFile func(*os.Root, string, []byte, os.FileMode) error,
+) error {
+	return applyCourseUpdateWithFilesystem(ctx, repositoryRoot, stage, update, writeFile,
+		func(root *os.Root, relative string, mode os.FileMode) error {
+			return root.MkdirAll(relative, mode)
+		})
+}
+
+func applyCourseUpdateWithFilesystem(
+	ctx context.Context,
+	repositoryRoot, stage string,
+	update learnercli.CourseUpdate,
+	writeFile func(*os.Root, string, []byte, os.FileMode) error,
+	mkdirAll func(*os.Root, string, os.FileMode) error,
+) (err error) {
+	type replacedFile struct {
+		path string
+		data []byte
+		mode os.FileMode
+	}
+	expected := make(map[string]string, len(update.Files))
+	for _, file := range update.Files {
+		if _, duplicate := expected[file.Path]; duplicate {
+			return errors.New("prepared course update repeats a file manifest entry")
+		}
+		expected[file.Path] = file.SHA256
+	}
+	if err := verifyCourseUpdateOperations(update, expected); err != nil {
+		return err
+	}
+	projectRoot, err := os.OpenRoot(repositoryRoot)
+	if err != nil {
+		return fmt.Errorf("open course update project root: %w", err)
+	}
+	defer projectRoot.Close()
+	for _, operation := range update.Operations {
+		if err := verifyCourseUpdateDestination(repositoryRoot, operation.Path); err != nil {
+			return err
+		}
+		info, statErr := projectRoot.Lstat(filepath.FromSlash(operation.Path))
 		if operation.Kind == "add" && statErr == nil {
 			return fmt.Errorf("course update would overwrite existing file %q", operation.Path)
 		}
 		if operation.Kind == "add" && !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
 		}
-		if operation.Kind == "replace" && (statErr != nil || !info.Mode().IsRegular()) {
+		if operation.Kind == "replace" && (statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
 			return fmt.Errorf("course update can replace only the existing regular file %q", operation.Path)
 		}
+		if operation.Kind == "delete" && (statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+			return fmt.Errorf("course update can delete only the existing regular file %q", operation.Path)
+		}
+	}
+	// Порядок отката зеркалит канонический builder: добавленное снимается в
+	// обратном порядке, затем восстанавливается заменённое и удалённое, затем
+	// исчезают созданные каталоги. Map дал бы недетерминированный обход, и две
+	// половины одного контракта разошлись бы там, где conformance-векторы
+	// как раз и обязаны их удерживать вместе.
+	var replaced []replacedFile
+	var added, createdDirs []string
+	defer func() {
+		if err == nil {
+			return
+		}
+		var rollbackErrors []error
+		for index := len(added) - 1; index >= 0; index-- {
+			path := added[index]
+			if rollbackErr := projectRoot.Remove(filepath.FromSlash(path)); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove added course update file %s: %w", path, rollbackErr))
+			}
+		}
+		for index := len(replaced) - 1; index >= 0; index-- {
+			prior := replaced[index]
+			path := prior.path
+			name := filepath.FromSlash(path)
+			if rollbackErr := projectRoot.WriteFile(name, prior.data, prior.mode.Perm()); rollbackErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore course update file %s: %w", path, rollbackErr))
+				continue
+			}
+			if rollbackErr := projectRoot.Chmod(name, prior.mode.Perm()); rollbackErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore course update mode %s: %w", path, rollbackErr))
+			}
+		}
+		for index := len(createdDirs) - 1; index >= 0; index-- {
+			path := createdDirs[index]
+			if rollbackErr := projectRoot.Remove(filepath.FromSlash(path)); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove created course update directory %s: %w", path, rollbackErr))
+			}
+		}
+		err = errors.Join(append([]error{err}, rollbackErrors...)...)
+	}()
+	for _, operation := range update.Operations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := verifyCourseUpdateDestination(repositoryRoot, operation.Path); err != nil {
+			return fmt.Errorf("course update destination changed during application: %w", err)
+		}
+		name := filepath.FromSlash(operation.Path)
+		info, statErr := projectRoot.Lstat(name)
+		if operation.Kind == "add" && statErr == nil {
+			return fmt.Errorf("course update destination changed during application: %q", operation.Path)
+		}
+		if operation.Kind == "add" && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if operation.Kind == "replace" && (statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+			return fmt.Errorf("course update destination changed during application: %q", operation.Path)
+		}
+		if operation.Kind == "delete" && (statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+			return fmt.Errorf("course update destination changed during application: %q", operation.Path)
+		}
+		if operation.Kind == "delete" {
+			prior, readErr := projectRoot.ReadFile(name)
+			if readErr != nil {
+				return readErr
+			}
+			replaced = append(replaced, replacedFile{path: operation.Path, data: prior, mode: info.Mode()})
+			if removeErr := projectRoot.Remove(name); removeErr != nil {
+				return removeErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			continue
+		}
+		source := filepath.Join(stage, name)
 		data, readErr := os.ReadFile(source)
 		if readErr != nil {
 			return readErr
 		}
 		if operation.Kind == "replace" {
-			prior, readErr := os.ReadFile(destination)
+			prior, readErr := projectRoot.ReadFile(name)
 			if readErr != nil {
 				return readErr
 			}
-			replaced[operation.Path] = replacedFile{data: prior, mode: info.Mode()}
+			replaced = append(replaced, replacedFile{path: operation.Path, data: prior, mode: info.Mode()})
 		} else {
-			if mkdirErr := os.MkdirAll(filepath.Dir(destination), 0o755); mkdirErr != nil {
+			missingDirs, err := missingCourseUpdateDirectories(projectRoot, filepath.Dir(name))
+			if err != nil {
+				return err
+			}
+			// MkdirAll may create an initial prefix before returning an error, so
+			// rollback must know the complete precomputed set before the call.
+			createdDirs = append(createdDirs, missingDirs...)
+			if mkdirErr := mkdirAll(projectRoot, filepath.Dir(name), 0o755); mkdirErr != nil {
 				return mkdirErr
 			}
 			added = append(added, operation.Path)
 		}
-		if writeErr := os.WriteFile(destination, data, 0o644); writeErr != nil {
+		if writeErr := writeFile(projectRoot, operation.Path, data, 0o644); writeErr != nil {
 			return writeErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func missingCourseUpdateDirectories(root *os.Root, parent string) ([]string, error) {
+	if parent == "." || parent == "" {
+		return nil, nil
+	}
+	parts := strings.Split(filepath.ToSlash(parent), "/")
+	missing := make([]string, 0, len(parts))
+	for index := range parts {
+		relative := strings.Join(parts[:index+1], "/")
+		info, err := root.Lstat(filepath.FromSlash(relative))
+		if errors.Is(err, os.ErrNotExist) {
+			missing = append(missing, relative)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, fmt.Errorf("course update path parent %q is not a regular directory", relative)
+		}
+	}
+	return missing, nil
+}
+
+func verifyCourseUpdateDestination(root, relative string) error {
+	current := root
+	parts := strings.Split(relative, "/")
+	for _, part := range parts[:len(parts)-1] {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("course update path parent %q is not a regular directory", relative)
 		}
 	}
 	return nil
@@ -760,8 +948,15 @@ func safeProjectRelativePath(value string) bool {
 	if value == "" || filepath.IsAbs(value) || strings.Contains(value, "\\") {
 		return false
 	}
-	clean := filepath.Clean(filepath.FromSlash(value))
-	return clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
+	if !filepath.IsLocal(filepath.FromSlash(value)) {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func writeProjectLink(root string, link learnercli.ProjectLink) error {
