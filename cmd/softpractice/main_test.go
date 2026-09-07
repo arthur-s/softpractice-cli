@@ -62,6 +62,7 @@ func TestRestoreRevisionProjectCreatesCurrentLinkedGitProject(t *testing.T) {
 				"assignment": map[string]any{
 					"id": "pa-foundation-02", "version": 1,
 					"title": "Rental period", "state": "available",
+					"local_checks": testLocalChecks(),
 				},
 				"latest_submission": map[string]any{
 					"id": submissionID, "revision_id": revisionID,
@@ -219,6 +220,7 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 				"assignment": map[string]any{
 					"id": "pa-foundation-05", "version": 1,
 					"title": "Module boundaries", "state": "submitted",
+					"local_checks": testLocalChecks(),
 				},
 				"latest_submission": map[string]any{
 					"id": submissionID, "revision_id": revisionID,
@@ -510,7 +512,7 @@ func TestStarterCommandDownloadsLinksAndInitializesGit(t *testing.T) {
 				"id": "equipment-rental-python", "title": "Equipment rental",
 				"first_assignment":   map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "estimated_minutes": 35},
 				"workspace":          map[string]any{"id": workspaceID, "project_id": "equipment-rental-python", "state": "active", "base_revision_id": nil, "support_mode": nil, "created_at": time.Now(), "updated_at": time.Now()},
-				"current_assignment": map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "state": "available"},
+				"current_assignment": map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "state": "available", "local_checks": testLocalChecks()},
 			}}})
 		case "/v1/workspaces/" + workspaceID + "/current-assignment/starter":
 			if request.URL.Query().Get("format") != "tar.gz" {
@@ -578,7 +580,7 @@ func TestStarterCommandUsesProjectDefaultDirectoryForFoundation01(t *testing.T) 
 				"id": "equipment-rental-python", "title": "Equipment rental",
 				"first_assignment":   map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "estimated_minutes": 35},
 				"workspace":          map[string]any{"id": workspaceID, "project_id": "equipment-rental-python", "state": "active", "base_revision_id": nil, "support_mode": nil, "created_at": time.Now(), "updated_at": time.Now()},
-				"current_assignment": map[string]any{"id": "pa-foundation-01", "title": "Foundation 01", "version": 1, "state": "available"},
+				"current_assignment": map[string]any{"id": "pa-foundation-01", "title": "Foundation 01", "version": 1, "state": "available", "local_checks": testLocalChecks()},
 			}}})
 		case "/v1/workspaces/" + workspaceID + "/current-assignment/starter":
 			writer.Header().Set("Content-Type", "application/gzip")
@@ -672,6 +674,7 @@ func TestUpdateCommandAppliesVerifiedCourseUpdateInPlace(t *testing.T) {
 				},
 				"assignment": map[string]any{
 					"id": "pa-foundation-02", "title": "Rental period", "version": 1, "state": "available",
+					"local_checks": testLocalChecks(),
 				},
 			})
 		case "/v1/workspaces/" + workspaceID + "/current-assignment/course-update":
@@ -749,6 +752,7 @@ func TestUpdateCommandDoesNotOverlayAContinuedProject(t *testing.T) {
 			},
 			"assignment": map[string]any{
 				"id": "pa-foundation-06", "title": "Notification boundary", "version": 1, "state": "available",
+				"local_checks": testLocalChecks(),
 			},
 		})
 	}))
@@ -776,6 +780,7 @@ func TestUpdateCommandLeavesProjectUntouchedWhenPolicyDeniesCurrentLesson(t *tes
 				},
 				"assignment": map[string]any{
 					"id": "pa-foundation-02", "title": "Rental period", "version": 1, "state": "available",
+					"local_checks": testLocalChecks(),
 				},
 			})
 		case "/v1/workspaces/" + workspaceID + "/current-assignment/course-update":
@@ -808,6 +813,120 @@ func TestUpdateCommandLeavesProjectUntouchedWhenPolicyDeniesCurrentLesson(t *tes
 	if err != nil || !repository.Clean {
 		t.Fatalf("policy denial changed project tree: %+v, %v", repository, err)
 	}
+}
+
+func TestUpdateMigratesLegacyProjectWithoutLocalChecks(t *testing.T) {
+	workspaceID := uuid.NewString()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-02", 1)
+	checksPath := filepath.Join(root, filepath.FromSlash(".softpractice/checks.json"))
+	if err := os.Remove(checksPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{{"add", "-u"}, {"commit", "--quiet", "-m", "legacy project"}} {
+		if output, err := exec.Command("git", append([]string{"-C", root}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/workspaces/"+workspaceID+"/current-assignment" {
+			http.NotFound(writer, request)
+			return
+		}
+		writeTestJSON(writer, map[string]any{
+			"workspace":         map[string]any{"id": workspaceID, "project_id": "equipment-rental-python", "state": "active", "base_revision_id": nil, "created_at": time.Now(), "updated_at": time.Now()},
+			"assignment":        map[string]any{"id": "pa-foundation-02", "title": "Rental period", "version": 1, "state": "available", "local_checks": testLocalChecks()},
+			"latest_submission": nil,
+		})
+	}))
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	var output bytes.Buffer
+	if err := updateLinkedProject(context.Background(), client, root, "", &output); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(checksPath); err != nil {
+		t.Fatalf("migrated checks: %v", err)
+	}
+	repository, err := inspectGitRepository(context.Background(), root, false)
+	if err != nil || !repository.Clean {
+		t.Fatalf("migrated repository = %+v, %v", repository, err)
+	}
+	if !strings.Contains(output.String(), "Public checks configuration was added") {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestSubmitDoesNotUploadWhenLocalCheckFails(t *testing.T) {
+	workspaceID := uuid.NewString()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-02", 1)
+	writeChecksAndCommit(t, root, `{"schema_version":1,"checks":[{"name":"public tests","executable":"git","args":["not-a-softpractice-command"],"timeout_seconds":30}]}`)
+	client, uploads, closeServer := submitTestClient(t, workspaceID)
+	defer closeServer()
+	var output bytes.Buffer
+	err := submit(context.Background(), client, root, []string{"--yes", "--checks"}, strings.NewReader(""), &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "public tests") {
+		t.Fatalf("submit error = %v", err)
+	}
+	if *uploads != 0 {
+		t.Fatalf("uploads = %d", *uploads)
+	}
+}
+
+func TestSubmitRejectsHeadChangedByLocalCheck(t *testing.T) {
+	workspaceID := uuid.NewString()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-02", 1)
+	if err := os.WriteFile(filepath.Join(root, "second.py"), []byte("pass\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "add", "second.py").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "--quiet", "-m", "second").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v: %s", err, output)
+	}
+	writeChecksAndCommit(t, root, fmt.Sprintf(`{"schema_version":1,"checks":[{"name":"move HEAD","executable":"git","args":["-C",%q,"reset","--soft","HEAD~"],"timeout_seconds":30}]}`, root))
+	client, uploads, closeServer := submitTestClient(t, workspaceID)
+	defer closeServer()
+	var output bytes.Buffer
+	err := submit(context.Background(), client, root, []string{"--yes", "--checks"}, strings.NewReader(""), &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "HEAD or the working tree changed") {
+		t.Fatalf("submit error = %v", err)
+	}
+	if *uploads != 0 {
+		t.Fatalf("uploads = %d", *uploads)
+	}
+}
+
+func writeChecksAndCommit(t *testing.T, root, body string) {
+	t.Helper()
+	path := filepath.Join(root, ".softpractice", "checks.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", root, "add", "--force", "--", ".softpractice/checks.json").CombinedOutput(); err != nil {
+		t.Fatalf("stage checks: %v: %s", err, output)
+	}
+	if output, err := exec.Command("git", "-C", root, "commit", "--quiet", "-m", "checks").CombinedOutput(); err != nil {
+		t.Fatalf("commit checks: %v: %s", err, output)
+	}
+}
+
+func submitTestClient(t *testing.T, workspaceID string) (*learnercli.Client, *int, func()) {
+	t.Helper()
+	uploads := new(int)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/workspaces/"+workspaceID+"/current-assignment" {
+			writeTestJSON(writer, map[string]any{
+				"workspace":         map[string]any{"id": workspaceID, "project_id": "equipment-rental-python", "state": "active", "base_revision_id": nil, "created_at": time.Now(), "updated_at": time.Now()},
+				"assignment":        map[string]any{"id": "pa-foundation-02", "title": "Rental period", "version": 1, "state": "available", "local_checks": testLocalChecks()},
+				"latest_submission": nil,
+			})
+			return
+		}
+		*uploads++
+		writer.WriteHeader(http.StatusCreated)
+	}))
+	return savedTestClient(t, server.URL), uploads, server.Close
 }
 
 func TestCourseUpdateStopsWhenWorktreeChangesDuringDownload(t *testing.T) {
@@ -868,7 +987,7 @@ func TestCourseUpdateStopsWhenWorktreeChangesDuringDownload(t *testing.T) {
 			Path string `json:"path"`
 		}{{Kind: "add", Path: "lesson_two.py"}},
 	}
-	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update)
+	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":1,"checks":[{"name":"test","executable":"git","args":["--version"],"timeout_seconds":30}]}`))
 	if err == nil || !strings.Contains(err.Error(), "working tree changed") {
 		t.Fatalf("update error = %v", err)
 	}
@@ -948,6 +1067,14 @@ func createGitRepository(t *testing.T, project string) string {
 	if err := os.WriteFile(filepath.Join(projectDirectory, "project.json"), []byte(project), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	checks := `{
+  "schema_version": 1,
+  "checks": [{"name":"test check","executable":"git","args":["--version"],"timeout_seconds":30}]
+}
+`
+	if err := os.WriteFile(filepath.Join(projectDirectory, "checks.json"), []byte(checks), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte("print('hello')\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -992,6 +1119,15 @@ func writeTestJSON(writer http.ResponseWriter, value any) {
 	}
 }
 
+func testLocalChecks() map[string]any {
+	return map[string]any{
+		"schema_version": 1,
+		"checks": []any{map[string]any{
+			"name": "test check", "executable": "git", "args": []string{"--version"}, "timeout_seconds": 30,
+		}},
+	}
+}
+
 func decodeTestJSON(data []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -1033,4 +1169,290 @@ func (s *mainMemorySecretStore) Set(service, account, secret string) error {
 func (s *mainMemorySecretStore) Delete(service, account string) error {
 	delete(s.values, service+"\x00"+account)
 	return nil
+}
+
+func TestUpdateInvalidChecksLeavesProjectUnchanged(t *testing.T) {
+	workspaceID := uuid.NewString()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	updateRoot := t.TempDir()
+	contents := []byte("lesson two\n")
+	if err := os.WriteFile(filepath.Join(updateRoot, "lesson_two.py"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	var archive bytes.Buffer
+	metadata, err := starterbundle.Build(updateRoot, []starterbundle.File{{
+		Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:]),
+	}}, &archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseRevisionID := uuid.NewString()
+	baseContentSHA256 := strings.Repeat("a", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" {
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+			return
+		}
+		if request.URL.Path != "/v1/workspaces/"+workspaceID+"/current-assignment/course-update/archive" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/gzip")
+		writer.Header().Set("Content-Length", fmt.Sprint(metadata.Size))
+		writer.Header().Set("X-Softpractice-Course-Update-SHA256", metadata.SHA256)
+		writer.Header().Set("X-Softpractice-Course-Update-Ref", "test-update@1.0.0")
+		writer.Header().Set("X-Softpractice-Course-Update-Base-Revision-ID", baseRevisionID)
+		writer.Header().Set("X-Softpractice-Course-Update-Base-Content-SHA256", baseContentSHA256)
+		_, _ = writer.Write(archive.Bytes())
+	}))
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	link, err := learnercli.LoadProjectLink(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := learnercli.CourseUpdate{
+		Ref: "test-update@1.0.0", FromAssignmentID: "pa-foundation-01", FromAssignmentVersion: 1,
+		ToAssignmentID: "pa-foundation-02", ToAssignmentVersion: 1,
+		BaseRevisionID: baseRevisionID, BaseContentSHA256: baseContentSHA256,
+		ArchiveSHA256: metadata.SHA256, ArchiveSize: metadata.Size,
+		Files: []struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		}{{Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:])}},
+		Operations: []struct {
+			Kind string `json:"kind"`
+			Path string `json:"path"`
+		}{{Kind: "add", Path: "lesson_two.py"}},
+	}
+	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":2,"checks":[]}`))
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("expected unsupported schema: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "lesson_two.py")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lesson files changed: %v", err)
+	}
+	changed, err := learnercli.LoadProjectLink(root)
+	if err != nil || changed.AssignmentID != link.AssignmentID {
+		t.Fatalf("link changed: %+v %v", changed, err)
+	}
+	repo, err := inspectGitRepository(context.Background(), root, false)
+	if err != nil || !repo.Clean {
+		t.Fatalf("tree changed: %+v %v", repo, err)
+	}
+}
+
+func TestSubmitChecksOnlyArchivedSources(t *testing.T) {
+	for _, language := range []string{"python", "go"} {
+		t.Run(language, func(t *testing.T) {
+			executable := "go"
+			if language == "python" {
+				executable = "python3"
+			}
+			if _, err := exec.LookPath(executable); err != nil {
+				t.Skip(err)
+			}
+			id := uuid.NewString()
+			root := createPinnedLinkedGitRepository(t, id, "pa-foundation-02", 1)
+			files := map[string]string{".gitignore": "helper.go\nhelper.py\n__pycache__/\n.pytest_cache/\n"}
+			args := []string{"test", "./..."}
+			ignored := "helper.go"
+			if language == "go" {
+				files["go.mod"] = "module example.com/publiccheck\n\ngo 1.22\n"
+				files["helper.go"] = "package example\nfunc answer() int {return 42}\n"
+				files["public_test.go"] = "package example\nimport \"testing\"\nfunc TestAnswer(t *testing.T) {if answer()!=42 {t.Fatal(\"answer\")}}\n"
+			} else {
+				args = []string{"-m", "unittest", "discover"}
+				ignored = "helper.py"
+				files["helper.py"] = "VALUE = 42\n"
+				files["test_public.py"] = "import unittest\nfrom helper import VALUE\nclass PublicTest(unittest.TestCase):\n    def test_value(self):\n        self.assertEqual(VALUE, 42)\n"
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out, err := exec.Command("git", "-C", root, "add", ".").CombinedOutput(); err != nil {
+				t.Fatalf("%v %s", err, out)
+			}
+			body, _ := json.Marshal(map[string]any{"schema_version": 1, "checks": []any{map[string]any{"name": "public tests", "executable": executable, "args": args, "timeout_seconds": 60}}})
+			writeChecksAndCommit(t, root, string(body))
+			cmd := exec.Command(executable, args...)
+			cmd.Dir = root
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("worktree tests: %v %s", err, out)
+			}
+			client, uploads, closeServer := submitTestClient(t, id)
+			defer closeServer()
+			var output bytes.Buffer
+			err := submit(context.Background(), client, root, []string{"--yes", "--checks"}, strings.NewReader(""), &output, &output)
+			if err == nil || *uploads != 0 || !strings.Contains(err.Error(), "public tests") {
+				t.Fatalf("missing archived source: uploads=%d err=%v output=%s", *uploads, err, &output)
+			}
+			if out, err := exec.Command("git", "-C", root, "add", "--force", ignored).CombinedOutput(); err != nil {
+				t.Fatalf("%v %s", err, out)
+			}
+			if out, err := exec.Command("git", "-C", root, "commit", "-qm", "include helper").CombinedOutput(); err != nil {
+				t.Fatalf("%v %s", err, out)
+			}
+			_ = submit(context.Background(), client, root, []string{"--yes", "--checks"}, strings.NewReader(""), &output, &output)
+			if *uploads != 1 {
+				t.Fatalf("complete snapshot was not uploaded: %s", &output)
+			}
+		})
+	}
+}
+
+func TestMetadataWriteFailureRollsBackCourseUpdate(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-01", 1)
+	stage := t.TempDir()
+	original := make(map[string]string)
+	for _, path := range []string{".softpractice/checks.json", ".softpractice/project.json"} {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		original[path] = string(data)
+	}
+	if err := os.MkdirAll(filepath.Join(stage, ".softpractice"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{"next.py", ".softpractice/checks.json", ".softpractice/project.json"}
+	var update learnercli.CourseUpdate
+	for i, path := range paths {
+		if err := os.WriteFile(filepath.Join(stage, path), []byte("updated"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		kind := "replace"
+		if i == 0 {
+			kind = "add"
+		}
+		update.Files = append(update.Files, struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		}{Path: path})
+		update.Operations = append(update.Operations, struct {
+			Kind string `json:"kind"`
+			Path string `json:"path"`
+		}{Kind: kind, Path: path})
+	}
+	failure := errors.New("injected metadata write failure")
+	err := applyCourseUpdateWithWriter(context.Background(), root, stage, update, func(root *os.Root, path string, data []byte, mode os.FileMode) error {
+		if err := root.WriteFile(filepath.FromSlash(path), data, mode); err != nil {
+			return err
+		}
+		if path == ".softpractice/project.json" {
+			return failure
+		}
+		return nil
+	})
+	if !errors.Is(err, failure) {
+		t.Fatalf("error=%v", err)
+	}
+	for path, prior := range original {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil || string(data) != prior {
+			t.Fatalf("metadata %s not restored: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "next.py")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("added lesson file not rolled back: %v", err)
+	}
+	repo, err := inspectGitRepository(context.Background(), root, false)
+	if err != nil || !repo.Clean {
+		t.Fatalf("dirty rollback: %+v %v", repo, err)
+	}
+}
+
+func TestCheckSnapshotRejectsChangedSource(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-02", 1)
+	repo, err := inspectGitRepository(context.Background(), root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(repo.ArchivePath)
+	snapshot, err := prepareCheckSnapshot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(snapshot.root)
+	if err := os.WriteFile(filepath.Join(snapshot.root, "main.py"), []byte("changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.verify(); err == nil {
+		t.Fatal("changed snapshot passed verification")
+	}
+}
+
+func TestSubmitOptionalChecks(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		configured  bool
+		args        []string
+		wantUploads int
+	}{
+		{"default off", false, []string{"--yes"}, 1},
+		{"enabled in project", true, []string{"--yes"}, 0},
+		{"explicit opt in", false, []string{"--yes", "--checks"}, 0},
+		{"explicit opt out", true, []string{"--yes", "--checks=false"}, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := uuid.NewString()
+			root := createPinnedLinkedGitRepository(t, id, "pa-foundation-02", 1)
+			writeChecksAndCommit(t, root, `{"schema_version":1,"checks":[{"name":"missing tool","executable":"softpractice-no-such-executable","timeout_seconds":1}]}`)
+			if test.configured {
+				if _, err := gitOutput(context.Background(), root, "config", "--local", autoChecksKey, "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client, uploads, closeServer := submitTestClient(t, id)
+			defer closeServer()
+			var output bytes.Buffer
+			err := submit(context.Background(), client, root, test.args, strings.NewReader(""), &output, &output)
+			if *uploads != test.wantUploads {
+				t.Fatalf("uploads=%d error=%v output=%s", *uploads, err, &output)
+			}
+			if test.wantUploads == 1 && !strings.Contains(output.String(), "Local checks were not run") {
+				t.Fatalf("missing explanation: %s", &output)
+			}
+		})
+	}
+}
+func TestAutoChecksSettingIsLocalAndNotSubmitted(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-02", 1)
+	other := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-02", 1)
+	t.Chdir(root)
+	var output bytes.Buffer
+	if err := setConfig(context.Background(), []string{"auto-checks", "true"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := projectAutoChecks(context.Background(), root)
+	if err != nil || !enabled {
+		t.Fatalf("setting=%v %v", enabled, err)
+	}
+	enabled, err = projectAutoChecks(context.Background(), other)
+	if err != nil || enabled {
+		t.Fatalf("setting leaked=%v %v", enabled, err)
+	}
+	repo, err := inspectGitRepository(context.Background(), root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(repo.ArchivePath)
+	if !repo.Clean {
+		t.Fatal("setting dirtied project")
+	}
+	for _, file := range repo.Files {
+		if strings.HasPrefix(file.Path, ".git/") {
+			t.Fatal("Git settings entered submission")
+		}
+	}
+	if err := setConfig(context.Background(), []string{"auto-checks", "false"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err = projectAutoChecks(context.Background(), root)
+	if err != nil || enabled {
+		t.Fatalf("disable=%v %v", enabled, err)
+	}
 }

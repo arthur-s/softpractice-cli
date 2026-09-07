@@ -44,10 +44,11 @@ type Practicum struct {
 		UpdatedAt      time.Time `json:"updated_at"`
 	} `json:"workspace"`
 	CurrentAssignment *struct {
-		ID      string `json:"id"`
-		Title   string `json:"title"`
-		Version int    `json:"version"`
-		State   string `json:"state"`
+		ID          string          `json:"id"`
+		Title       string          `json:"title"`
+		Version     int             `json:"version"`
+		State       string          `json:"state"`
+		LocalChecks json.RawMessage `json:"local_checks"`
 	} `json:"current_assignment"`
 	Lessons json.RawMessage `json:"lessons"`
 }
@@ -141,10 +142,11 @@ type WorkspaceStatus struct {
 		UpdatedAt      time.Time `json:"updated_at"`
 	} `json:"workspace"`
 	Assignment struct {
-		ID      string `json:"id"`
-		Version int    `json:"version"`
-		Title   string `json:"title"`
-		State   string `json:"state"`
+		ID          string          `json:"id"`
+		Version     int             `json:"version"`
+		Title       string          `json:"title"`
+		State       string          `json:"state"`
+		LocalChecks json.RawMessage `json:"local_checks"`
 	} `json:"assignment"`
 	LatestSubmission *struct {
 		ID          string    `json:"id"`

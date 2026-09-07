@@ -11,14 +11,18 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/arthur-s/softpractice-cli/internal/learnercli"
+	"github.com/arthur-s/softpractice-cli/internal/localchecks"
 	"github.com/arthur-s/softpractice-cli/internal/starterbundle"
 	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
@@ -48,8 +52,14 @@ type submissionReceipt struct {
 	SubmittedAt     time.Time `json:"submitted_at"`
 }
 
+func commandContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
 func main() {
-	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+	ctx, stop := commandContext()
+	defer stop()
+	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
@@ -284,6 +294,13 @@ func restoreRevisionProject(
 	}
 	stage := materialized.Path
 	defer os.RemoveAll(stage)
+	workspace, err := client.GetWorkspaceStatus(ctx, source.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("load local checks for restored project: %w", err)
+	}
+	if err := writeLocalChecks(stage, workspace.Assignment.LocalChecks); err != nil {
+		return err
+	}
 	link := learnercli.ProjectLink{
 		SchemaVersion:     2,
 		WorkspaceID:       source.WorkspaceID,
@@ -331,8 +348,11 @@ func showConfig(ctx context.Context, output io.Writer) error {
 func setConfig(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) != 2 {
 		return errors.New(text(ctx,
-			"использование: softpractice set api-url|web-url|lang VALUE",
-			"usage: softpractice set api-url|web-url|lang VALUE"))
+			"использование: softpractice set api-url|web-url|lang|auto-checks VALUE",
+			"usage: softpractice set api-url|web-url|lang|auto-checks VALUE"))
+	}
+	if args[0] == "auto-checks" {
+		return setProjectAutoChecks(ctx, args[1], output)
 	}
 	settings := settingsFromContext(ctx)
 	config, replacedInvalidConfig, err := settings.Config.LoadForUpdate()
@@ -441,6 +461,9 @@ func downloadStarter(ctx context.Context, client *learnercli.Client, args []stri
 	if extractErr != nil || closeErr != nil {
 		return fmt.Errorf("verify starter project: %w", errors.Join(extractErr, closeErr))
 	}
+	if err := writeLocalChecks(stage, practicum.CurrentAssignment.LocalChecks); err != nil {
+		return err
+	}
 	if err := initializeStarterGit(ctx, stage, learnercli.ProjectLink{
 		SchemaVersion:     2,
 		WorkspaceID:       practicum.Workspace.ID,
@@ -482,7 +505,7 @@ func initializeLinkedGit(
 		return fmt.Errorf("write Git local exclude: %w", err)
 	}
 	linkDirectory := filepath.Join(root, ".softpractice")
-	if err := os.Mkdir(linkDirectory, 0o700); err != nil {
+	if err := os.MkdirAll(linkDirectory, 0o700); err != nil {
 		return fmt.Errorf("create project link directory: %w", err)
 	}
 	linkBytes := []byte(fmt.Sprintf(
@@ -498,6 +521,9 @@ func initializeLinkedGit(
 	}
 	if output, err := exec.CommandContext(ctx, "git", "-C", root, "add", "--all").CombinedOutput(); err != nil {
 		return fmt.Errorf("stage starter baseline: %v: %s", err, output)
+	}
+	if output, err := exec.CommandContext(ctx, "git", "-C", root, "add", "--force", "--", localchecks.RelativePath).CombinedOutput(); err != nil {
+		return fmt.Errorf("stage local checks: %v: %s", err, output)
 	}
 	if output, err := exec.CommandContext(ctx, "git", "-C", root,
 		"-c", "user.name=Softpractice", "-c", "user.email=starter@softpractice.invalid",
@@ -541,6 +567,21 @@ func updateLinkedProject(
 		return fmt.Errorf(text(ctx, "workspace находится в состоянии %s и не имеет обновления курса", "workspace is %s and has no course update"), workspace.Workspace.State)
 	}
 	if link.SchemaVersion == 2 && workspace.Assignment.ID == link.AssignmentID && workspace.Assignment.Version == link.AssignmentVersion {
+		checksPath := filepath.Join(repository.Root, filepath.FromSlash(localchecks.RelativePath))
+		if _, statErr := os.Stat(checksPath); errors.Is(statErr, os.ErrNotExist) {
+			if err := writeLocalChecks(repository.Root, workspace.Assignment.LocalChecks); err != nil {
+				return err
+			}
+			if err := commitLocalChecks(ctx, repository.Root, "Add Softpractice public checks"); err != nil {
+				return err
+			}
+			fmt.Fprintln(output, text(ctx,
+				"Конфигурация публичных проверок добавлена в проект. Теперь повторите `softpractice submit`.",
+				"Public checks configuration was added to the project. Now run `softpractice submit` again."))
+			return nil
+		} else if statErr != nil {
+			return fmt.Errorf("inspect local checks: %w", statErr)
+		}
 		return fmt.Errorf(text(ctx, "урок %s v%d всё ещё текущий; отправьте решение и дождитесь принятого результата перед обновлением", "lesson %s v%d is still current; submit and receive an accepted result before updating"), link.AssignmentID, link.AssignmentVersion)
 	}
 	update, err := client.PrepareCourseUpdate(ctx, link.WorkspaceID)
@@ -562,7 +603,7 @@ func updateLinkedProject(
 	if normalized.ContentSHA256 != update.BaseContentSHA256 {
 		return errors.New(text(ctx, "локальный HEAD не совпадает с принятой предыдущей ревизией; переключитесь на этот commit перед обновлением", "local HEAD does not match the accepted previous solution; switch to that commit before updating"))
 	}
-	if err := downloadAndApplyCourseUpdate(ctx, client, repository.Root, link, update); err != nil {
+	if err := downloadAndApplyCourseUpdate(ctx, client, repository.Root, link, update, workspace.Assignment.LocalChecks); err != nil {
 		return err
 	}
 	fmt.Fprintf(output, text(ctx, "Проект курса обновлён в этой папке: %s\n", "Course project updated in place: %s\n"), repository.Root)
@@ -578,6 +619,7 @@ func downloadAndApplyCourseUpdate(
 	repositoryRoot string,
 	link learnercli.ProjectLink,
 	update learnercli.CourseUpdate,
+	localChecks []byte,
 ) error {
 	archive, err := os.CreateTemp("", "softpractice-course-update-*.tar.gz")
 	if err != nil {
@@ -619,17 +661,48 @@ func downloadAndApplyCourseUpdate(
 	if !clean {
 		return errors.New("working tree changed while the course update was downloading; review and commit or stash those changes before retrying")
 	}
-	if err := applyCourseUpdate(ctx, repositoryRoot, stage, update); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(stage); err != nil {
-		return fmt.Errorf("remove course-update staging directory: %w", err)
-	}
+	// Prepare both metadata files before touching the student's project, then
+	// apply them under the same rollback as the lesson files.
 	updatedLink := link
 	updatedLink.SchemaVersion = 2
 	updatedLink.AssignmentID = update.ToAssignmentID
 	updatedLink.AssignmentVersion = update.ToAssignmentVersion
-	if err := writeProjectLink(repositoryRoot, updatedLink); err != nil {
+	if err := writeLocalChecks(stage, localChecks); err != nil {
+		return err
+	}
+	if err := writeProjectLink(stage, updatedLink); err != nil {
+		return err
+	}
+	application := update
+	application.Files = slices.Clone(application.Files)
+	application.Operations = slices.Clone(application.Operations)
+	for _, path := range []string{localchecks.RelativePath, ".softpractice/project.json"} {
+		for _, op := range update.Operations {
+			if op.Path == path {
+				return fmt.Errorf("course update cannot supply CLI metadata %q", path)
+			}
+		}
+		kind := "replace"
+		if _, err := os.Lstat(filepath.Join(repositoryRoot, filepath.FromSlash(path))); errors.Is(err, os.ErrNotExist) {
+			kind = "add"
+		} else if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(filepath.Join(stage, filepath.FromSlash(path)))
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(data)
+		application.Files = append(application.Files, struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		}{Path: path, SHA256: hex.EncodeToString(digest[:])})
+		application.Operations = append(application.Operations, struct {
+			Kind string `json:"kind"`
+			Path string `json:"path"`
+		}{Kind: kind, Path: path})
+	}
+	if err := applyCourseUpdate(ctx, repositoryRoot, stage, application); err != nil {
 		return err
 	}
 	updatePaths := make([]string, 0, len(update.Operations))
@@ -639,6 +712,9 @@ func downloadAndApplyCourseUpdate(
 	gitAddArguments := append([]string{"-C", repositoryRoot, "add", "--"}, updatePaths...)
 	if gitOutput, err := exec.CommandContext(ctx, "git", gitAddArguments...).CombinedOutput(); err != nil {
 		return fmt.Errorf("stage course update: %v: %s", err, gitOutput)
+	}
+	if gitOutput, err := exec.CommandContext(ctx, "git", "-C", repositoryRoot, "add", "--force", "--", localchecks.RelativePath).CombinedOutput(); err != nil {
+		return fmt.Errorf("stage local checks update: %v: %s", err, gitOutput)
 	}
 	if gitOutput, err := exec.CommandContext(ctx, "git", "-C", repositoryRoot,
 		"-c", "user.name=Softpractice", "-c", "user.email=starter@softpractice.invalid",
@@ -965,6 +1041,37 @@ func writeProjectLink(root string, link learnercli.ProjectLink) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
+func writeLocalChecks(root string, raw []byte) error {
+	config, err := localchecks.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid local checks received from server: %w", err)
+	}
+	body, err := localchecks.Marshal(config)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Join(root, ".softpractice")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create local checks directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(localchecks.RelativePath)), body, 0o600); err != nil {
+		return fmt.Errorf("write local checks: %w", err)
+	}
+	return nil
+}
+
+func commitLocalChecks(ctx context.Context, root, message string) error {
+	if output, err := exec.CommandContext(ctx, "git", "-C", root, "add", "--force", "--", localchecks.RelativePath).CombinedOutput(); err != nil {
+		return fmt.Errorf("stage local checks: %v: %s", err, output)
+	}
+	if output, err := exec.CommandContext(ctx, "git", "-C", root,
+		"-c", "user.name=Softpractice", "-c", "user.email=starter@softpractice.invalid",
+		"commit", "--no-verify", "-m", message).CombinedOutput(); err != nil {
+		return fmt.Errorf("commit local checks: %v: %s", err, output)
+	}
+	return nil
+}
+
 func downloadStarterInto(
 	ctx context.Context,
 	client *learnercli.Client,
@@ -972,7 +1079,14 @@ func downloadStarterInto(
 	assignmentVersion int,
 	target string,
 ) error {
-	target, err := filepath.Abs(target)
+	workspace, err := client.GetWorkspaceStatus(ctx, workspaceID)
+	if err != nil {
+		return fmt.Errorf("load starter checks: %w", err)
+	}
+	if workspace.Assignment.ID != assignmentID || workspace.Assignment.Version != assignmentVersion {
+		return errors.New("assignment changed while preparing the starter; retry")
+	}
+	target, err = filepath.Abs(target)
 	if err != nil {
 		return err
 	}
@@ -1010,6 +1124,9 @@ func downloadStarterInto(
 	closeErr = file.Close()
 	if extractErr != nil || closeErr != nil {
 		return fmt.Errorf("verify starter project: %w", errors.Join(extractErr, closeErr))
+	}
+	if err := writeLocalChecks(stage, workspace.Assignment.LocalChecks); err != nil {
+		return err
 	}
 	if err := initializeStarterGit(ctx, stage, learnercli.ProjectLink{
 		SchemaVersion:     2,
@@ -1147,6 +1264,7 @@ func submit(
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	yes := flags.Bool("yes", false, "submit without an interactive confirmation")
+	checksFlag := flags.Bool("checks", false, "run local public checks before submitting")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -1187,6 +1305,25 @@ func submit(
 	)
 	for _, path := range suspiciousPaths(repository.Files) {
 		fmt.Fprintf(errorOutput, text(ctx, "Предупреждение: commit содержит потенциально чувствительный файл: %s\n", "Warning: the commit contains a potentially sensitive file: %s\n"), path)
+	}
+	enabled, explicit := *checksFlag, false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "checks" {
+			explicit = true
+		}
+	})
+	if !explicit {
+		enabled, err = projectAutoChecks(ctx, repository.Root)
+		if err != nil {
+			return err
+		}
+	}
+	if enabled {
+		if err := runSubmissionChecks(ctx, repository, output, errorOutput); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(output, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для локального запуска: softpractice submit --checks.", "Local checks were not run. The server will check your solution. To run local checks: softpractice submit --checks."))
 	}
 	if !*yes {
 		confirmed, err := confirmSubmission(ctx, input, output)
