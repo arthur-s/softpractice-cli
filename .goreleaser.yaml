@@ -2,8 +2,11 @@ version: 2
 
 builds:
   - main: ./cmd/softpractice
+    binary: softpractice
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.cliVersion={{ .Version }}
     goos:
       - linux
       - windows
@@ -24,6 +27,9 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+
+checksum:
+  name_template: checksums.txt
 
 changelog:
   sort: asc

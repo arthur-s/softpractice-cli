@@ -23,7 +23,8 @@ import (
 	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
 
-const cliVersion = "0.1.0"
+// cliVersion is replaced by GoReleaser for tagged releases.
+var cliVersion = "dev"
 
 // This namespace is part of retry identity and must remain stable across CLI releases.
 var submissionNamespace = uuid.MustParse("8e57862c-98cf-4c24-af14-1541172e9a5f")

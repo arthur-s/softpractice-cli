@@ -44,6 +44,15 @@ existing file.
 go install github.com/arthur-s/softpractice-cli/cmd/softpractice@latest
 ```
 
+## Install with npm
+
+```bash
+npm install -g @softpractice/softpractice-cli
+```
+
+The npm installer downloads the native binary that matches the user's platform
+from the corresponding GitHub Release.
+
 ## Configure
 
 ```bash

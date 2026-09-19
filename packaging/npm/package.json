@@ -1,0 +1,40 @@
+{
+  "name": "@softpractice/softpractice-cli",
+  "version": "0.1.0",
+  "description": "Cross-platform command-line companion for a Softpractice learning workspace",
+  "license": "MIT",
+  "author": "Arthur Sultanbekov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arthur-s/softpractice-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/arthur-s/softpractice-cli/issues"
+  },
+  "homepage": "https://github.com/arthur-s/softpractice-cli#readme",
+  "bin": {
+    "softpractice": "bin/softpractice.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "test": "node --test test/**/*.test.js",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "tar": "^7.4.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
