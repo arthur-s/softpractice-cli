@@ -1,69 +1,127 @@
-# Softpractice CLI
+<p align="center">
+  <a href="https://softpractice.ru">
+    <img src="https://raw.githubusercontent.com/arthur-s/softpractice-cli/main/docs/assets/softpractice-logo-horizontal-navy.png" alt="SoftPractice" width="360">
+  </a>
+</p>
 
-`softpractice` is the cross-platform command-line companion for a Softpractice
-learning workspace. It signs a learner in through a browser, downloads a
-starter project, submits a committed Git revision, applies verified in-place
-course updates, and opens the workspace or its latest result.
+# SoftPractice CLI
 
-The CLI communicates only with the public Softpractice API. It contains no
-evaluation prompts, hidden tests, course content, or server credentials.
+The command-line companion for [SoftPractice](https://softpractice.ru) — an
+online platform for project-based programming practice with an AI mentor.
 
-## Restore a project to continue a practicum
+SoftPractice lets you work on realistic programming tasks in local Git
+projects, submit committed solutions for review, receive feedback, and continue
+through a practicum lesson by lesson. The CLI connects your local development
+workflow to your SoftPractice workspace.
 
-If the original local directory is unavailable, recreate a linked Git project
-from the learner's latest usable revision:
+> SoftPractice — онлайн-тренажёр по программированию с AI-наставником,
+> построенный вокруг практической работы над проектами. CLI позволяет получать
+> задания, отправлять решения и переходить между уроками прямо из терминала.
 
-```bash
-softpractice project restore \
-  --practicum equipment-rental-python \
-  --directory ./equipment-rental-python
-```
-
-The restore is placed only into a new directory. The CLI prefers the latest
-submission of the current lesson. If the current lesson has no submission yet,
-it restores the accepted predecessor and applies the ordinary authorized
-course update. With no submission history it uses the current published
-starter.
-
-## Download a submitted project
-
-The result page URL contains the submission ID. Download that exact immutable
-revision as a ZIP with:
-
-```bash
-softpractice submission download --id 3caf6517-915f-4e92-819a-aa9fa4cae367
-```
-
-Use `--output PATH` to choose a different ZIP destination. The command only
-downloads revisions owned by the signed-in learner and never overwrites an
-existing file.
-
-## Install from source
-
-```bash
-go install github.com/arthur-s/softpractice-cli/cmd/softpractice@latest
-```
-
-## Install with npm
+## Install
 
 ```bash
 npm install -g @softpractice/softpractice-cli
 ```
 
-The npm installer downloads the native binary that matches the user's platform
-from the corresponding GitHub Release.
-
-## Configure
+Verify the installation:
 
 ```bash
-softpractice set api-url https://your.softpractice.example
-softpractice set web-url https://your.softpractice.example
+softpractice --help
+```
+
+## Getting started
+
+Sign in to SoftPractice:
+
+```bash
 softpractice login
 ```
 
-Run `softpractice --help` to see all commands. Configuration stores only API
-addresses and language preference; refresh credentials remain in the operating
-system keyring.
+Download the starter project for your current practicum:
+
+```bash
+softpractice starter
+```
+
+Open the created directory and check the current lesson:
+
+```bash
+cd <project-directory>
+softpractice status
+```
+
+Work on the project and commit your changes with Git. When the solution is
+ready, submit the current commit:
+
+```bash
+softpractice submit
+```
+
+Check the submission and open its result:
+
+```bash
+softpractice submission show
+softpractice open
+```
+
+After an accepted solution, apply the transition to the next available lesson:
+
+```bash
+softpractice update
+```
+
+## Common commands
+
+| Command | Description |
+| --- | --- |
+| `softpractice login` | Sign in through the browser |
+| `softpractice starter` | Download the first lesson project |
+| `softpractice status` | Show the current lesson and local project state |
+| `softpractice submit` | Submit the current committed Git revision |
+| `softpractice submission show` | Show the latest submission and review result |
+| `softpractice update` | Apply the transition to the next lesson |
+| `softpractice open` | Open the workspace or latest result in the browser |
+| `softpractice project restore` | Restore a project from the latest usable revision |
+
+Run `softpractice help <command>` for detailed help.
+
+## Language
+
+SoftPractice CLI supports English and Russian and selects a language from the
+system locale when possible.
+
+Choose a language explicitly:
+
+```bash
+softpractice set lang en
+softpractice set lang ru
+```
+
+You can also override it for a single command:
+
+```bash
+softpractice --lang ru status
+```
+
+## Project recovery
+
+If the original project directory is unavailable, restore the latest usable
+revision into a new directory:
+
+```bash
+softpractice project restore \
+  --practicum <practicum-id> \
+  --directory ./restored-project
+```
+
+The CLI never overwrites an existing project directory.
+
+## Links
+
+- [SoftPractice](https://softpractice.ru)
+- [Source code](https://github.com/arthur-s/softpractice-cli)
+- [Issues](https://github.com/arthur-s/softpractice-cli/issues)
 
 ## License
 
