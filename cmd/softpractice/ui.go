@@ -87,6 +87,16 @@ func displaySettings(store configStore) runtimeSettings {
 	return settings
 }
 
+func settingOverrideNotice(ctx context.Context, setting, saved string) string {
+	variable := environmentVariableForSetting(setting)
+	if variable == "" || strings.TrimSpace(saved) == "" {
+		return ""
+	}
+	return text(ctx,
+		" (сохранено: "+saved+", перекрыто "+variable+")",
+		" (saved: "+saved+", overridden by "+variable+")")
+}
+
 func validateRuntimeLanguage(value language) error {
 	if value != languageRussian && value != languageEnglish {
 		return errors.New("language must be ru or en")
