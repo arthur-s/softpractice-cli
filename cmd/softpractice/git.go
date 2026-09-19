@@ -54,7 +54,7 @@ func inspectGitRepository(
 	if !createArchive {
 		return repository, nil
 	}
-	filesOutput, err := gitOutput(ctx, repository.Root, "ls-tree", "-r", "-l", "-z", "HEAD")
+	filesOutput, err := gitOutput(ctx, repository.Root, "ls-tree", "-r", "-l", "-z", repository.CommitSHA)
 	if err != nil {
 		return gitRepository{}, err
 	}
@@ -148,7 +148,7 @@ func createGitArchive(ctx context.Context, repository *gitRepository) error {
 		"--format=tar.gz",
 		"--output",
 		repository.ArchivePath,
-		"HEAD",
+		repository.CommitSHA,
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		_ = os.Remove(repository.ArchivePath)
