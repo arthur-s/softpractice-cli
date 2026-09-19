@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ func TestCredentialStoreUsesSystemSecretAndPrivateAtomicMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credentials metadata mode = %o", info.Mode().Perm())
 	}
 	metadata, err := os.ReadFile(store.Path)
@@ -55,11 +56,13 @@ func TestCredentialStoreUsesSystemSecretAndPrivateAtomicMetadata(t *testing.T) {
 	if got.AccessToken != "" || !got.AccessExpiresAt.IsZero() {
 		t.Fatalf("persisted access credential = %+v", got)
 	}
-	if err := os.Chmod(store.Path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Load(); err == nil {
-		t.Fatal("broad credentials metadata permissions were accepted")
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(store.Path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Load(); err == nil {
+			t.Fatal("broad credentials metadata permissions were accepted")
+		}
 	}
 }
 
