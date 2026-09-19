@@ -28,7 +28,7 @@ func TestStartedPracticumAcceptsCurrentPublicCatalogFields(t *testing.T) {
 			"introduction":       map[string]any{"eyebrow": "Practice", "sections": []any{map[string]any{"title": "Welcome"}}},
 			"first_assignment":   map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "estimated_minutes": 35, "learner_surface": "diagnostic"},
 			"workspace":          map[string]any{"id": workspaceID, "project_id": "equipment-rental-python", "state": "active", "base_revision_id": nil, "support_mode": nil, "created_at": time.Now(), "updated_at": time.Now()},
-			"current_assignment": map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "state": "available"},
+			"current_assignment": map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "state": "available", "local_checks": map[string]any{"schema_version": 1, "checks": []any{}}},
 			"lessons":            []any{map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "learner_surface": "diagnostic", "state": "available"}},
 		}}, "upcoming_practicums": []any{}})
 	}))
@@ -50,7 +50,7 @@ func TestStartedPracticumAcceptsCurrentPublicCatalogFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if practicum.ID != "equipment-rental-python" || practicum.Workspace == nil || practicum.Workspace.ID != workspaceID || practicum.CurrentAssignment == nil || practicum.CurrentAssignment.ID != "pa-diagnostic-01" {
+	if practicum.ID != "equipment-rental-python" || practicum.Workspace == nil || practicum.Workspace.ID != workspaceID || practicum.CurrentAssignment == nil || practicum.CurrentAssignment.ID != "pa-diagnostic-01" || len(practicum.CurrentAssignment.LocalChecks) == 0 {
 		t.Fatalf("started practicum = %+v", practicum)
 	}
 }

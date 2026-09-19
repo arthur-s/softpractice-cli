@@ -1,0 +1,6 @@
+# Keep text files byte-stable across developer machines and CI runners. In
+# particular, integrity sidecars are calculated over an LF representation.
+* text=auto eol=lf
+
+# Repository assets must never undergo line-ending conversion.
+*.png -text -eol

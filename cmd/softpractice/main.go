@@ -27,7 +27,8 @@ import (
 	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
 
-const cliVersion = "0.1.0"
+// cliVersion is replaced by GoReleaser for tagged releases.
+var cliVersion = "dev"
 
 // This namespace is part of retry identity and must remain stable across CLI releases.
 var submissionNamespace = uuid.MustParse("8e57862c-98cf-4c24-af14-1541172e9a5f")
@@ -338,10 +339,17 @@ func restoreRevisionProject(
 
 func showConfig(ctx context.Context, output io.Writer) error {
 	settings := settingsFromContext(ctx)
+	config, err := settings.Config.Load()
+	if err != nil {
+		return err
+	}
 	fmt.Fprintf(output, text(ctx,
-		"Конфигурация: %s\nAPI: %s\nWeb: %s\nЯзык: %s\n",
-		"Configuration: %s\nAPI: %s\nWeb: %s\nLanguage: %s\n"),
-		settings.Config.Path, settings.APIURL, settings.WebURL, settings.Language)
+		"Конфигурация: %s\nAPI: %s%s\nWeb: %s%s\nЯзык: %s\n",
+		"Configuration: %s\nAPI: %s%s\nWeb: %s%s\nLanguage: %s\n"),
+		settings.Config.Path,
+		settings.APIURL, settingOverrideNotice(ctx, "api-url", config.APIURL),
+		settings.WebURL, settingOverrideNotice(ctx, "web-url", config.WebURL),
+		settings.Language)
 	return nil
 }
 
@@ -388,7 +396,28 @@ func setConfig(ctx context.Context, args []string, output io.Writer) error {
 			"The invalid configuration was replaced with a new one."))
 	}
 	fmt.Fprintf(output, text(ctx, "Настройка %s сохранена в %s\n", "Saved %s in %s\n"), args[0], settings.Config.Path)
+	if variable := environmentVariableForSetting(args[0]); variable != "" {
+		fmt.Fprintln(output, text(ctx,
+			"Сохранённое значение сейчас перекрыто переменной окружения "+variable+". Удалите её из окружения, чтобы CLI использовал эту настройку.",
+			"The saved value is currently overridden by "+variable+". Remove it from the environment for the CLI to use this setting."))
+	}
 	return nil
+}
+
+func environmentVariableForSetting(setting string) string {
+	var name string
+	switch setting {
+	case "api-url":
+		name = "SOFTPRACTICE_API_URL"
+	case "web-url":
+		name = "SOFTPRACTICE_WEB_URL"
+	default:
+		return ""
+	}
+	if strings.TrimSpace(os.Getenv(name)) == "" {
+		return ""
+	}
+	return name
 }
 
 func downloadStarter(ctx context.Context, client *learnercli.Client, args []string, output, errorOutput io.Writer) error {

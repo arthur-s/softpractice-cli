@@ -171,6 +171,29 @@ func TestSetAndConfigCommandsUseTheUserConfigDirectory(t *testing.T) {
 	}
 }
 
+func TestConfigExplainsWhenEnvironmentOverridesSavedURLs(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv(configDirectoryEnv, directory)
+	t.Setenv("SOFTPRACTICE_API_URL", "https://local.softpractice.ru")
+	t.Setenv("SOFTPRACTICE_WEB_URL", "https://local.softpractice.ru")
+	store := configStore{Path: filepath.Join(directory, "config.json")}
+	if err := store.Save(cliConfig{APIURL: "https://softpractice.ru", WebURL: "https://softpractice.ru"}); err != nil {
+		t.Fatal(err)
+	}
+	var output, errors strings.Builder
+	if err := run(context.Background(), []string{"config"}, strings.NewReader(""), &output, &errors); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"API: https://local.softpractice.ru (saved: https://softpractice.ru, overridden by SOFTPRACTICE_API_URL)",
+		"Web: https://local.softpractice.ru (saved: https://softpractice.ru, overridden by SOFTPRACTICE_WEB_URL)",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("config output %q does not contain %q", output.String(), expected)
+		}
+	}
+}
+
 func TestSetRepairsAnInvalidRegularConfiguration(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv(configDirectoryEnv, directory)
