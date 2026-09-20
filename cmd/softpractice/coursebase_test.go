@@ -276,3 +276,49 @@ func ignoreProjectLink(t *testing.T, root string) {
 		t.Fatalf("ignore local project link in test repository: %v: %s", err, output)
 	}
 }
+
+// The version is what a bug report and a refused submission both ask for, so
+// it answers through a flag, through a subcommand, and it is listed in help.
+func TestVersionAnswersThroughFlagAndSubcommand(t *testing.T) {
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var output, errorOutput bytes.Buffer
+			if err := run(context.Background(), args, nil, &output, &errorOutput); err != nil {
+				t.Fatalf("run(%v) = %v", args, err)
+			}
+			if !strings.HasPrefix(output.String(), "softpractice ") {
+				t.Fatalf("version output = %q", output.String())
+			}
+		})
+	}
+	var help, helpErrors bytes.Buffer
+	if err := run(context.Background(), []string{"help"}, nil, &help, &helpErrors); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(help.String(), "version") {
+		t.Fatalf("help does not list version: %q", help.String())
+	}
+	var commandHelp, commandHelpErrors bytes.Buffer
+	if err := run(context.Background(), []string{"help", "version"}, nil, &commandHelp, &commandHelpErrors); err != nil {
+		t.Fatalf("help version = %v", err)
+	}
+	if !strings.Contains(commandHelp.String(), "--version") {
+		t.Fatalf("version help = %q", commandHelp.String())
+	}
+}
+
+// A source build carries a placeholder the server refuses, so the version says
+// so instead of letting the learner meet it as a rejected submit.
+func TestVersionWarnsThatASourceBuildCannotSubmit(t *testing.T) {
+	var output, errorOutput bytes.Buffer
+	if err := run(context.Background(), []string{"version"}, nil, &output, &errorOutput); err != nil {
+		t.Fatal(err)
+	}
+	if cliVersion != developmentVersion {
+		t.Skipf("binary was stamped with %q", cliVersion)
+	}
+	if !strings.Contains(output.String(), "refuse its submissions") ||
+		!strings.Contains(output.String(), "main.cliVersion=") {
+		t.Fatalf("placeholder version does not explain itself: %q", output.String())
+	}
+}

@@ -27,8 +27,13 @@ import (
 	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
 
+// developmentVersion is what a build carries when GoReleaser did not stamp it.
+// The server accepts only a semantic version, so a binary holding this value
+// can read the course but cannot submit to it.
+const developmentVersion = "dev"
+
 // cliVersion is replaced by GoReleaser for tagged releases.
-var cliVersion = "dev"
+var cliVersion = developmentVersion
 
 // This namespace is part of retry identity and must remain stable across CLI releases.
 var submissionNamespace = uuid.MustParse("8e57862c-98cf-4c24-af14-1541172e9a5f")
@@ -51,6 +56,23 @@ type submissionReceipt struct {
 	RevisionID      string    `json:"revision_id"`
 	EvaluationJobID string    `json:"evaluation_job_id"`
 	SubmittedAt     time.Time `json:"submitted_at"`
+}
+
+// printVersion reports the version this binary was built with. A build made
+// outside a release carries the placeholder, and the server refuses its
+// submissions, so the placeholder says that here rather than letting the
+// learner meet it for the first time as a rejected submit.
+func printVersion(ctx context.Context, output io.Writer) {
+	fmt.Fprintf(output, "softpractice %s\n", cliVersion)
+	if cliVersion == developmentVersion {
+		fmt.Fprintln(output, text(ctx,
+			"Это сборка из исходников без версии: сервер отклонит отправку решения.\n"+
+				"Соберите её с версией, например:\n"+
+				`  go build -ldflags "-X main.cliVersion=0.1.5-dev" ./cmd/softpractice`,
+			"This is a source build with no version: the server will refuse its submissions.\n"+
+				"Build it with one, for example:\n"+
+				`  go build -ldflags "-X main.cliVersion=0.1.5-dev" ./cmd/softpractice`))
+	}
 }
 
 func commandContext() (context.Context, context.CancelFunc) {
@@ -88,6 +110,7 @@ func run(
 	root.Usage = func() { printHelp(withSettings(ctx, settings), errorOutput) }
 	apiURL := root.String("api", "", "API base URL")
 	languageValue := root.String("lang", "", "CLI language: ru or en")
+	showVersion := root.Bool("version", false, "print the CLI version and exit")
 	if err := root.Parse(args); err != nil {
 		return err
 	}
@@ -101,6 +124,13 @@ func run(
 	}
 	ctx = withSettings(ctx, settings)
 	remaining := root.Args()
+	// The version answers before anything else, including the missing-command
+	// help: it is what a bug report and a refused submission both ask for, and
+	// it must work when nothing else does.
+	if *showVersion || (len(remaining) == 1 && remaining[0] == "version") {
+		printVersion(ctx, output)
+		return nil
+	}
 	if len(remaining) == 0 {
 		printHelp(ctx, output)
 		return nil
