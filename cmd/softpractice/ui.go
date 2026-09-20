@@ -179,7 +179,7 @@ func printCommandHelp(ctx context.Context, output io.Writer, command string) err
 	case "submit":
 		russian, english = "Использование: softpractice submit [--yes] [--checks=true|false]\n\nОтправляет чистый Git commit текущего урока на проверку.", "Usage: softpractice submit [--yes] [--checks=true|false]\n\nSubmits the clean Git commit for the current lesson."
 	case "update":
-		russian, english = "Использование: softpractice update\n\nПосле принятия решения применяет в этом же проекте переход к следующему уроку: добавляет, заменяет или удаляет только явно объявленные файлы.", "Usage: softpractice update\n\nAfter acceptance, applies the next-lesson transition in the same project, adding, replacing, or removing only explicitly declared files."
+		russian, english = "Использование: softpractice update\n\nПосле принятия решения применяет в этом же проекте переход к следующему уроку: добавляет, заменяет или удаляет только явно объявленные файлы.\n\nПереход применяется к принятому решению прошлого урока. Если текущий коммит — другой, команда ничего не меняет и показывает оба коммита и способ продолжить.", "Usage: softpractice update\n\nAfter acceptance, applies the next-lesson transition in the same project, adding, replacing, or removing only explicitly declared files.\n\nThe transition applies to the accepted solution of the previous lesson. When the current commit is a different one, the command changes nothing and shows both commits and how to continue."
 	case "open":
 		russian, english = "Использование: softpractice open [--web URL] [--no-browser]\n\nОткрывает workspace или последний результат в браузере.", "Usage: softpractice open [--web URL] [--no-browser]\n\nOpens the workspace or the latest result in a browser."
 	case "set":

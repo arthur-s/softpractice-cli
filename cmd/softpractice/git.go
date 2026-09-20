@@ -139,20 +139,9 @@ func createGitArchive(ctx context.Context, repository *gitRepository) error {
 		_ = os.Remove(repository.ArchivePath)
 		return err
 	}
-	command := exec.CommandContext(
-		ctx,
-		"git",
-		"-C",
-		repository.Root,
-		"archive",
-		"--format=tar.gz",
-		"--output",
-		repository.ArchivePath,
-		repository.CommitSHA,
-	)
-	if output, err := command.CombinedOutput(); err != nil {
+	if err := gitArchiveCommit(ctx, repository.Root, repository.CommitSHA, repository.ArchivePath); err != nil {
 		_ = os.Remove(repository.ArchivePath)
-		return fmt.Errorf("create Git archive: %v: %s", err, output)
+		return err
 	}
 	info, err := os.Stat(repository.ArchivePath)
 	if err != nil {
@@ -163,6 +152,24 @@ func createGitArchive(ctx context.Context, repository *gitRepository) error {
 	if repository.CompressedBytes > 10<<20 {
 		_ = os.Remove(repository.ArchivePath)
 		return errors.New("archive exceeds the 10 MiB compressed submission limit")
+	}
+	return nil
+}
+
+func gitArchiveCommit(ctx context.Context, root, commit, destination string) error {
+	command := exec.CommandContext(
+		ctx,
+		"git",
+		"-C",
+		root,
+		"archive",
+		"--format=tar.gz",
+		"--output",
+		destination,
+		commit,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("create Git archive: %v: %s", err, output)
 	}
 	return nil
 }

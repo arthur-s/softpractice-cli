@@ -630,7 +630,9 @@ func updateLinkedProject(
 	}
 	defer os.Remove(normalized.Path)
 	if normalized.ContentSHA256 != update.BaseContentSHA256 {
-		return errors.New(text(ctx, "локальный HEAD не совпадает с принятой предыдущей ревизией; переключитесь на этот commit перед обновлением", "local HEAD does not match the accepted previous solution; switch to that commit before updating"))
+		// A non-empty startDirectory means this is the staging copy driven by
+		// `project restore`, not a folder the learner is working in.
+		return courseUpdateMismatchError(ctx, repository, update, startDirectory != "")
 	}
 	if err := downloadAndApplyCourseUpdate(ctx, client, repository.Root, link, update, workspace.Assignment.LocalChecks); err != nil {
 		return err
@@ -1266,20 +1268,49 @@ func status(
 		workspace.Assignment.Title,
 		workspace.Assignment.State,
 	)
+	if pendingTransition(link, workspace) {
+		// The server has already opened the next lesson while this folder is
+		// still on the previous one. Without this line `Assignment` names a
+		// lesson whose files are not here yet, and the submission line below
+		// reads as if the previous lesson had disappeared.
+		fmt.Fprintf(
+			output,
+			text(ctx, "Переход не применён: %s v%d → %s v%d (выполните `softpractice update`)\n",
+				"Transition pending: %s v%d → %s v%d (run `softpractice update`)\n"),
+			link.AssignmentID, link.AssignmentVersion,
+			workspace.Assignment.ID, workspace.Assignment.Version,
+		)
+	}
 	fmt.Fprintf(output, text(ctx, "Локальный HEAD: %s\n", "Local HEAD: %s\n"), repository.CommitSHA)
 	fmt.Fprintf(output, text(ctx, "Рабочее дерево: %s\n", "Working tree: %s\n"), clean)
+	// The server reports submissions of the current lesson only, so an
+	// unqualified "none" hides the accepted history of the previous lessons.
 	if workspace.LatestSubmission == nil {
-		fmt.Fprintln(output, text(ctx, "Последняя отправка: нет", "Latest submission: none"))
+		fmt.Fprintf(
+			output,
+			text(ctx, "Последняя отправка урока %s: нет\n", "Latest %s submission: none\n"),
+			workspace.Assignment.ID,
+		)
 	} else {
 		fmt.Fprintf(
 			output,
-			text(ctx, "Последняя отправка: %s (%s, %s)\n", "Latest submission: %s (%s, %s)\n"),
+			text(ctx, "Последняя отправка урока %s: %s (%s, %s)\n", "Latest %s submission: %s (%s, %s)\n"),
+			workspace.Assignment.ID,
 			workspace.LatestSubmission.ID,
 			workspace.LatestSubmission.JobState,
 			workspace.LatestSubmission.SubmittedAt.Format(time.RFC3339),
 		)
 	}
 	return nil
+}
+
+// pendingTransition reports whether the server has opened the next lesson
+// while this folder still holds the previous one. A v1 link pins no lesson, so
+// it can never be compared this way.
+func pendingTransition(link learnercli.ProjectLink, workspace learnercli.WorkspaceStatus) bool {
+	return link.SchemaVersion == 2 &&
+		(link.AssignmentID != workspace.Assignment.ID ||
+			link.AssignmentVersion != workspace.Assignment.Version)
 }
 
 func submit(
