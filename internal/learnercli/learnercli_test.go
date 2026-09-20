@@ -201,6 +201,61 @@ func TestParseHTTPErrorAcceptsServerFailureSupportID(t *testing.T) {
 	}
 }
 
+// A learner keeps running the CLI version they installed, so a response that
+// gained a field on the server has to stay readable by every published CLI.
+func TestAPIResponsesTolerateFieldsThisVersionDoesNotKnow(t *testing.T) {
+	var update CourseUpdate
+	err := decodeJSON([]byte(`{
+  "ref": "pa-foundation-01-to-pa-foundation-02@1.0.0",
+  "from_assignment_id": "pa-foundation-01",
+  "from_assignment_version": 1,
+  "to_assignment_id": "pa-foundation-02",
+  "to_assignment_version": 1,
+  "base_revision_id": "00000000-0000-4000-8000-000000000000",
+  "base_content_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "base_commit_sha": "504929d0ac0dd3f2cf2d1b6cbd5ac0cfd1cb2b3f",
+  "archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "archive_size": 1,
+  "files": [],
+  "operations": []
+}`), &update)
+	if err != nil {
+		t.Fatalf("decode response with a newer field: %v", err)
+	}
+	if update.ToAssignmentID != "pa-foundation-02" || update.BaseRevisionID != "00000000-0000-4000-8000-000000000000" {
+		t.Fatalf("decoded course update = %+v", update)
+	}
+}
+
+// Tolerating unknown fields must not tolerate a second document: a response
+// body carries exactly one, and anything after it means the stream is not what
+// it claims to be.
+func TestAPIResponsesStillRejectTrailingDocuments(t *testing.T) {
+	var update CourseUpdate
+	err := decodeJSON([]byte(`{"ref": "first"}{"ref": "second"}`), &update)
+	if err == nil || !strings.Contains(err.Error(), "trailing JSON") {
+		t.Fatalf("decodeJSON() = %v, want a trailing JSON error", err)
+	}
+}
+
+// An error envelope goes through the same decoder. A field added to it must
+// not collapse every server message into "invalid_response", which is what a
+// failed decode falls back to.
+func TestErrorEnvelopeSurvivesNewFields(t *testing.T) {
+	err := parseHTTPError(http.StatusConflict, []byte(`{
+  "error": {"code": "course_update_base_ambiguous", "message": "Choose a revision.", "support_id": ""},
+  "request_id": "00000000-0000-4000-8000-000000000001",
+  "documentation_url": "https://softpractice.ru/docs/course-update"
+}`))
+	var response *HTTPError
+	if !errors.As(err, &response) {
+		t.Fatalf("parseHTTPError() = %T, want *HTTPError", err)
+	}
+	if response.Code != "course_update_base_ambiguous" || response.Message != "Choose a revision." {
+		t.Fatalf("parsed error = %+v", *response)
+	}
+}
+
 func TestClientRefreshesAndKeepsAccessTokenInMemory(t *testing.T) {
 	refreshes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

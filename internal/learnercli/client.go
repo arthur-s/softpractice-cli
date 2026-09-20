@@ -585,9 +585,16 @@ func parseHTTPError(status int, body []byte) error {
 	}
 }
 
+// decodeJSON reads one API response. Unknown fields are ignored on purpose:
+// a learner runs whichever CLI version they installed, so every published
+// version has to keep working when the API adds a field to a response it
+// already serves. Rejecting those fields would turn an additive server change
+// into a broken `update` for everyone who has not upgraded, and it never
+// caught the opposite failure anyway, because a field the server stops sending
+// decodes as a zero value either way. Locally owned files stay strict: they
+// are written by this CLI, so an unknown key there is a real defect.
 func decodeJSON(data []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return fmt.Errorf("decode API response: %w", err)
 	}
