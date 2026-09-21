@@ -1,6 +1,6 @@
 {
   "name": "@softpractice/softpractice-cli",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "CLI for SoftPractice, an online platform for project-based programming practice",
   "license": "MIT",
   "author": "Arthur Sultanbekov",
