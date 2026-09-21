@@ -314,7 +314,7 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 		"Project: equipment-rental-python",
 		"Assignment: pa-foundation-05 v1",
 		"Working tree: clean",
-		"Latest submission: " + submissionID,
+		"Latest pa-foundation-05 submission: " + submissionID,
 	} {
 		if !strings.Contains(statusOutput.String(), expected) {
 			t.Fatalf("status output %q does not contain %q", statusOutput.String(), expected)

@@ -56,7 +56,18 @@ type machineStatus struct {
 		Head  string `json:"head"`
 		Clean bool   `json:"clean"`
 	} `json:"local"`
+	// Transition is present only while the server has already opened the next
+	// lesson and this folder still holds the previous one. It is additive: a
+	// contract_version 1 reader that ignores unknown keys is unaffected.
+	Transition       *machineTransition        `json:"transition,omitempty"`
 	LatestSubmission *machineSubmissionSummary `json:"latest_submission"`
+}
+
+type machineTransition struct {
+	FromAssignmentID      string `json:"from_assignment_id"`
+	FromAssignmentVersion int    `json:"from_assignment_version"`
+	ToAssignmentID        string `json:"to_assignment_id"`
+	ToAssignmentVersion   int    `json:"to_assignment_version"`
 }
 
 type machineSubmissionSummary struct {
@@ -84,6 +95,12 @@ func writeStatusJSON(
 	payload.Assignment.State = workspace.Assignment.State
 	payload.Local.Head = repository.CommitSHA
 	payload.Local.Clean = repository.Clean
+	if pendingTransition(link, workspace) {
+		payload.Transition = &machineTransition{
+			FromAssignmentID: link.AssignmentID, FromAssignmentVersion: link.AssignmentVersion,
+			ToAssignmentID: workspace.Assignment.ID, ToAssignmentVersion: workspace.Assignment.Version,
+		}
+	}
 	if workspace.LatestSubmission != nil {
 		payload.LatestSubmission = &machineSubmissionSummary{
 			ID: workspace.LatestSubmission.ID, RevisionID: workspace.LatestSubmission.RevisionID,

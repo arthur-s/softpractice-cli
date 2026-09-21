@@ -27,8 +27,13 @@ import (
 	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
 
+// developmentVersion is what a build carries when GoReleaser did not stamp it.
+// The server accepts only a semantic version, so a binary holding this value
+// can read the course but cannot submit to it.
+const developmentVersion = "dev"
+
 // cliVersion is replaced by GoReleaser for tagged releases.
-var cliVersion = "dev"
+var cliVersion = developmentVersion
 
 // This namespace is part of retry identity and must remain stable across CLI releases.
 var submissionNamespace = uuid.MustParse("8e57862c-98cf-4c24-af14-1541172e9a5f")
@@ -51,6 +56,23 @@ type submissionReceipt struct {
 	RevisionID      string    `json:"revision_id"`
 	EvaluationJobID string    `json:"evaluation_job_id"`
 	SubmittedAt     time.Time `json:"submitted_at"`
+}
+
+// printVersion reports the version this binary was built with. A build made
+// outside a release carries the placeholder, and the server refuses its
+// submissions, so the placeholder says that here rather than letting the
+// learner meet it for the first time as a rejected submit.
+func printVersion(ctx context.Context, output io.Writer) {
+	fmt.Fprintf(output, "softpractice %s\n", cliVersion)
+	if cliVersion == developmentVersion {
+		fmt.Fprintln(output, text(ctx,
+			"Это сборка из исходников без версии: сервер отклонит отправку решения.\n"+
+				"Соберите её с версией, например:\n"+
+				`  go build -ldflags "-X main.cliVersion=0.1.5-dev" ./cmd/softpractice`,
+			"This is a source build with no version: the server will refuse its submissions.\n"+
+				"Build it with one, for example:\n"+
+				`  go build -ldflags "-X main.cliVersion=0.1.5-dev" ./cmd/softpractice`))
+	}
 }
 
 func commandContext() (context.Context, context.CancelFunc) {
@@ -88,6 +110,7 @@ func run(
 	root.Usage = func() { printHelp(withSettings(ctx, settings), errorOutput) }
 	apiURL := root.String("api", "", "API base URL")
 	languageValue := root.String("lang", "", "CLI language: ru or en")
+	showVersion := root.Bool("version", false, "print the CLI version and exit")
 	if err := root.Parse(args); err != nil {
 		return err
 	}
@@ -101,6 +124,13 @@ func run(
 	}
 	ctx = withSettings(ctx, settings)
 	remaining := root.Args()
+	// The version answers before anything else, including the missing-command
+	// help: it is what a bug report and a refused submission both ask for, and
+	// it must work when nothing else does.
+	if *showVersion || (len(remaining) == 1 && remaining[0] == "version") {
+		printVersion(ctx, output)
+		return nil
+	}
 	if len(remaining) == 0 {
 		printHelp(ctx, output)
 		return nil
@@ -147,6 +177,9 @@ func run(
 	}
 	if err := validateRuntimeLanguage(settings.Language); err != nil {
 		return err
+	}
+	if remaining[0] == "check" {
+		return checkProject(ctx, "", remaining[1:], output, errorOutput)
 	}
 	if _, err := learnercli.NewClient(settings.APIURL, learnercli.CredentialStore{}); err != nil {
 		return err
@@ -343,13 +376,26 @@ func showConfig(ctx context.Context, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	autoChecks := text(ctx,
+		"недоступны (запустите команду в связанном проекте)",
+		"not available (run this command inside a linked project)")
+	if repository, repositoryErr := inspectGitRepository(ctx, "", false); repositoryErr == nil {
+		if _, linkErr := learnercli.LoadProjectLink(repository.Root); linkErr == nil {
+			enabled, checksErr := projectAutoChecks(ctx, repository.Root)
+			if checksErr != nil {
+				return checksErr
+			}
+			autoChecks = fmt.Sprintf("%t", enabled)
+		}
+	}
 	fmt.Fprintf(output, text(ctx,
-		"Конфигурация: %s\nAPI: %s%s\nWeb: %s%s\nЯзык: %s\n",
-		"Configuration: %s\nAPI: %s%s\nWeb: %s%s\nLanguage: %s\n"),
+		"Конфигурация: %s\nAPI: %s%s\nWeb: %s%s\nЯзык: %s\nАвтопроверки: %s\n",
+		"Configuration: %s\nAPI: %s%s\nWeb: %s%s\nLanguage: %s\nAuto-checks: %s\n"),
 		settings.Config.Path,
 		settings.APIURL, settingOverrideNotice(ctx, "api-url", config.APIURL),
 		settings.WebURL, settingOverrideNotice(ctx, "web-url", config.WebURL),
-		settings.Language)
+		settings.Language,
+		autoChecks)
 	return nil
 }
 
@@ -630,7 +676,9 @@ func updateLinkedProject(
 	}
 	defer os.Remove(normalized.Path)
 	if normalized.ContentSHA256 != update.BaseContentSHA256 {
-		return errors.New(text(ctx, "локальный HEAD не совпадает с принятой предыдущей ревизией; переключитесь на этот commit перед обновлением", "local HEAD does not match the accepted previous solution; switch to that commit before updating"))
+		// A non-empty startDirectory means this is the staging copy driven by
+		// `project restore`, not a folder the learner is working in.
+		return courseUpdateMismatchError(ctx, repository, update, startDirectory != "")
 	}
 	if err := downloadAndApplyCourseUpdate(ctx, client, repository.Root, link, update, workspace.Assignment.LocalChecks); err != nil {
 		return err
@@ -1266,20 +1314,49 @@ func status(
 		workspace.Assignment.Title,
 		workspace.Assignment.State,
 	)
+	if pendingTransition(link, workspace) {
+		// The server has already opened the next lesson while this folder is
+		// still on the previous one. Without this line `Assignment` names a
+		// lesson whose files are not here yet, and the submission line below
+		// reads as if the previous lesson had disappeared.
+		fmt.Fprintf(
+			output,
+			text(ctx, "Переход не применён: %s v%d → %s v%d (выполните `softpractice update`)\n",
+				"Transition pending: %s v%d → %s v%d (run `softpractice update`)\n"),
+			link.AssignmentID, link.AssignmentVersion,
+			workspace.Assignment.ID, workspace.Assignment.Version,
+		)
+	}
 	fmt.Fprintf(output, text(ctx, "Локальный HEAD: %s\n", "Local HEAD: %s\n"), repository.CommitSHA)
 	fmt.Fprintf(output, text(ctx, "Рабочее дерево: %s\n", "Working tree: %s\n"), clean)
+	// The server reports submissions of the current lesson only, so an
+	// unqualified "none" hides the accepted history of the previous lessons.
 	if workspace.LatestSubmission == nil {
-		fmt.Fprintln(output, text(ctx, "Последняя отправка: нет", "Latest submission: none"))
+		fmt.Fprintf(
+			output,
+			text(ctx, "Последняя отправка урока %s: нет\n", "Latest %s submission: none\n"),
+			workspace.Assignment.ID,
+		)
 	} else {
 		fmt.Fprintf(
 			output,
-			text(ctx, "Последняя отправка: %s (%s, %s)\n", "Latest submission: %s (%s, %s)\n"),
+			text(ctx, "Последняя отправка урока %s: %s (%s, %s)\n", "Latest %s submission: %s (%s, %s)\n"),
+			workspace.Assignment.ID,
 			workspace.LatestSubmission.ID,
 			workspace.LatestSubmission.JobState,
 			workspace.LatestSubmission.SubmittedAt.Format(time.RFC3339),
 		)
 	}
 	return nil
+}
+
+// pendingTransition reports whether the server has opened the next lesson
+// while this folder still holds the previous one. A v1 link pins no lesson, so
+// it can never be compared this way.
+func pendingTransition(link learnercli.ProjectLink, workspace learnercli.WorkspaceStatus) bool {
+	return link.SchemaVersion == 2 &&
+		(link.AssignmentID != workspace.Assignment.ID ||
+			link.AssignmentVersion != workspace.Assignment.Version)
 }
 
 func submit(
@@ -1352,7 +1429,7 @@ func submit(
 			return err
 		}
 	} else {
-		fmt.Fprintln(output, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для локального запуска: softpractice submit --checks.", "Local checks were not run. The server will check your solution. To run local checks: softpractice submit --checks."))
+		fmt.Fprintln(output, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для отдельного локального запуска: softpractice check.", "Local checks were not run. The server will check your solution. To run them separately: softpractice check."))
 	}
 	if !*yes {
 		confirmed, err := confirmSubmission(ctx, input, output)

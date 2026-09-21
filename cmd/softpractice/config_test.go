@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,14 +160,54 @@ func TestSetAndConfigCommandsUseTheUserConfigDirectory(t *testing.T) {
 	t.Setenv("SOFTPRACTICE_WEB_URL", "")
 	t.Setenv("SOFTPRACTICE_LANGUAGE", "en")
 	var output, errors strings.Builder
-	if err := run(context.Background(), []string{"set", "api-url", "https://local.softpractice.ru"}, strings.NewReader(""), &output, &errors); err != nil {
+	if err := run(context.Background(), []string{"set", "api-url", "https://api.example.test"}, strings.NewReader(""), &output, &errors); err != nil {
 		t.Fatal(err)
 	}
 	output.Reset()
 	if err := run(context.Background(), []string{"config"}, strings.NewReader(""), &output, &errors); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "https://local.softpractice.ru") || !strings.Contains(output.String(), filepath.Join(directory, "config.json")) {
+	if !strings.Contains(output.String(), "https://api.example.test") || !strings.Contains(output.String(), filepath.Join(directory, "config.json")) {
+		t.Fatalf("config output = %q", output.String())
+	}
+}
+
+func TestConfigShowsProjectAutoChecks(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, "00000000-0000-4000-8000-000000000001", "pa-foundation-02", 1)
+	t.Chdir(root)
+	t.Setenv(configDirectoryEnv, t.TempDir())
+	t.Setenv("SOFTPRACTICE_LANGUAGE", "en")
+	for _, test := range []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "disabled", enabled: false},
+		{name: "enabled", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := gitOutput(context.Background(), root, "config", "--local", autoChecksKey, fmt.Sprintf("%t", test.enabled)); err != nil {
+				t.Fatal(err)
+			}
+			var output, errors strings.Builder
+			if err := run(context.Background(), []string{"config"}, strings.NewReader(""), &output, &errors); err != nil {
+				t.Fatal(err)
+			}
+			if expected := fmt.Sprintf("Auto-checks: %t", test.enabled); !strings.Contains(output.String(), expected) {
+				t.Fatalf("config output %q does not contain %q", output.String(), expected)
+			}
+		})
+	}
+}
+
+func TestConfigExplainsAutoChecksOutsideLinkedProject(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv(configDirectoryEnv, t.TempDir())
+	t.Setenv("SOFTPRACTICE_LANGUAGE", "ru")
+	var output, errors strings.Builder
+	if err := run(context.Background(), []string{"config"}, strings.NewReader(""), &output, &errors); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Автопроверки: недоступны (запустите команду в связанном проекте)") {
 		t.Fatalf("config output = %q", output.String())
 	}
 }
@@ -174,8 +215,8 @@ func TestSetAndConfigCommandsUseTheUserConfigDirectory(t *testing.T) {
 func TestConfigExplainsWhenEnvironmentOverridesSavedURLs(t *testing.T) {
 	directory := t.TempDir()
 	t.Setenv(configDirectoryEnv, directory)
-	t.Setenv("SOFTPRACTICE_API_URL", "https://local.softpractice.ru")
-	t.Setenv("SOFTPRACTICE_WEB_URL", "https://local.softpractice.ru")
+	t.Setenv("SOFTPRACTICE_API_URL", "https://api.example.test")
+	t.Setenv("SOFTPRACTICE_WEB_URL", "https://app.example.test")
 	store := configStore{Path: filepath.Join(directory, "config.json")}
 	if err := store.Save(cliConfig{APIURL: "https://softpractice.ru", WebURL: "https://softpractice.ru"}); err != nil {
 		t.Fatal(err)
@@ -185,8 +226,8 @@ func TestConfigExplainsWhenEnvironmentOverridesSavedURLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"API: https://local.softpractice.ru (saved: https://softpractice.ru, overridden by SOFTPRACTICE_API_URL)",
-		"Web: https://local.softpractice.ru (saved: https://softpractice.ru, overridden by SOFTPRACTICE_WEB_URL)",
+		"API: https://api.example.test (saved: https://softpractice.ru, overridden by SOFTPRACTICE_API_URL)",
+		"Web: https://app.example.test (saved: https://softpractice.ru, overridden by SOFTPRACTICE_WEB_URL)",
 	} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("config output %q does not contain %q", output.String(), expected)
