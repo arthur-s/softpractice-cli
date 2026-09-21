@@ -43,6 +43,34 @@ func setProjectAutoChecks(ctx context.Context, value string, output io.Writer) e
 	fmt.Fprintf(output, text(ctx, "Автозапуск публичных проверок: %s (только этот проект).\n", "Automatic public checks: %s (this project only).\n"), value)
 	return nil
 }
+
+func checkProject(ctx context.Context, startDirectory string, args []string, output, errorOutput io.Writer) error {
+	if len(args) != 0 {
+		return errors.New(text(ctx, "использование: softpractice check", "usage: softpractice check"))
+	}
+	repository, err := inspectGitRepository(ctx, startDirectory, false)
+	if err != nil {
+		return err
+	}
+	if _, err := learnercli.LoadProjectLink(repository.Root); err != nil {
+		return err
+	}
+	checks, err := localchecks.Load(repository.Root)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(output, text(ctx,
+		"\nЛокальные публичные проверки рабочего дерева:",
+		"\nLocal public checks for the working tree:"))
+	if err := localchecks.Run(ctx, repository.Root, checks, output, errorOutput); err != nil {
+		return err
+	}
+	fmt.Fprintln(output, text(ctx,
+		"Все локальные публичные проверки прошли.",
+		"All local public checks passed."))
+	return nil
+}
+
 func runSubmissionChecks(ctx context.Context, repository gitRepository, output, errorOutput io.Writer) error {
 	snapshot, err := prepareCheckSnapshot(repository)
 	if err != nil {

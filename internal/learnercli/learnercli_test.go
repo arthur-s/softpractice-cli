@@ -88,7 +88,7 @@ func TestDefaultCredentialStoreKeepsExplicitTestDirectoryIsolated(t *testing.T) 
 		Path: filepath.Join(t.TempDir(), "credentials.json"), Secrets: secrets, KeyringAccountSuffix: "-second",
 	}
 	credentials := Credentials{
-		APIURL: "https://local.softpractice.ru", RefreshToken: "first-refresh",
+		APIURL: "https://api.example.test", RefreshToken: "first-refresh",
 		RefreshIdleExpiresAt: time.Now().Add(time.Hour), RefreshAbsoluteExpiresAt: time.Now().Add(2 * time.Hour),
 	}
 	if err := first.Save(credentials); err != nil {

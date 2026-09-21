@@ -6,6 +6,8 @@
 
 # SoftPractice CLI
 
+English | [Русский](https://github.com/arthur-s/softpractice-cli/blob/main/README_RU.md)
+
 The command-line companion for [SoftPractice](https://softpractice.ru) — an
 online platform for project-based programming practice with an AI mentor.
 
@@ -13,10 +15,6 @@ SoftPractice lets you work on realistic programming tasks in local Git
 projects, submit committed solutions for review, receive feedback, and continue
 through a practicum lesson by lesson. The CLI connects your local development
 workflow to your SoftPractice workspace.
-
-> SoftPractice — онлайн-тренажёр по программированию с AI-наставником,
-> построенный вокруг практической работы над проектами. CLI позволяет получать
-> задания, отправлять решения и переходить между уроками прямо из терминала.
 
 ## Install
 
@@ -78,6 +76,7 @@ softpractice update
 | `softpractice login` | Sign in through the browser |
 | `softpractice starter` | Download the first lesson project |
 | `softpractice status` | Show the current lesson and local project state |
+| `softpractice check` | Run public checks against the current working tree |
 | `softpractice submit` | Submit the current committed Git revision |
 | `softpractice submission show` | Show the latest submission and review result |
 | `softpractice update` | Apply the transition to the next lesson |
@@ -85,6 +84,29 @@ softpractice update
 | `softpractice project restore` | Restore a project from the latest usable revision |
 
 Run `softpractice help <command>` for detailed help.
+
+## Local checks
+
+Run the public checks while working, including against uncommitted changes:
+
+```bash
+softpractice check
+```
+
+The command uses the current working tree and does not submit anything. If the
+project uses a Python virtual environment, activate it first so the configured
+`python3` command resolves to that environment.
+
+To run the checks automatically against the exact committed revision before
+each submission:
+
+```bash
+softpractice set auto-checks true
+```
+
+`softpractice submit --checks` enables the same pre-submission check for one
+run. Unlike `softpractice check`, submission checks require a clean working
+tree and run in an isolated snapshot of `HEAD`.
 
 ## Language
 

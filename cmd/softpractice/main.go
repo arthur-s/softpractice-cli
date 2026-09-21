@@ -178,6 +178,9 @@ func run(
 	if err := validateRuntimeLanguage(settings.Language); err != nil {
 		return err
 	}
+	if remaining[0] == "check" {
+		return checkProject(ctx, "", remaining[1:], output, errorOutput)
+	}
 	if _, err := learnercli.NewClient(settings.APIURL, learnercli.CredentialStore{}); err != nil {
 		return err
 	}
@@ -373,13 +376,26 @@ func showConfig(ctx context.Context, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	autoChecks := text(ctx,
+		"недоступны (запустите команду в связанном проекте)",
+		"not available (run this command inside a linked project)")
+	if repository, repositoryErr := inspectGitRepository(ctx, "", false); repositoryErr == nil {
+		if _, linkErr := learnercli.LoadProjectLink(repository.Root); linkErr == nil {
+			enabled, checksErr := projectAutoChecks(ctx, repository.Root)
+			if checksErr != nil {
+				return checksErr
+			}
+			autoChecks = fmt.Sprintf("%t", enabled)
+		}
+	}
 	fmt.Fprintf(output, text(ctx,
-		"Конфигурация: %s\nAPI: %s%s\nWeb: %s%s\nЯзык: %s\n",
-		"Configuration: %s\nAPI: %s%s\nWeb: %s%s\nLanguage: %s\n"),
+		"Конфигурация: %s\nAPI: %s%s\nWeb: %s%s\nЯзык: %s\nАвтопроверки: %s\n",
+		"Configuration: %s\nAPI: %s%s\nWeb: %s%s\nLanguage: %s\nAuto-checks: %s\n"),
 		settings.Config.Path,
 		settings.APIURL, settingOverrideNotice(ctx, "api-url", config.APIURL),
 		settings.WebURL, settingOverrideNotice(ctx, "web-url", config.WebURL),
-		settings.Language)
+		settings.Language,
+		autoChecks)
 	return nil
 }
 
@@ -1413,7 +1429,7 @@ func submit(
 			return err
 		}
 	} else {
-		fmt.Fprintln(output, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для локального запуска: softpractice submit --checks.", "Local checks were not run. The server will check your solution. To run local checks: softpractice submit --checks."))
+		fmt.Fprintln(output, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для отдельного локального запуска: softpractice check.", "Local checks were not run. The server will check your solution. To run them separately: softpractice check."))
 	}
 	if !*yes {
 		confirmed, err := confirmSubmission(ctx, input, output)

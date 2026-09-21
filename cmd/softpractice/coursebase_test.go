@@ -298,12 +298,41 @@ func TestVersionAnswersThroughFlagAndSubcommand(t *testing.T) {
 	if !strings.Contains(help.String(), "version") {
 		t.Fatalf("help does not list version: %q", help.String())
 	}
+	if !strings.Contains(help.String(), "\nVersion:\n  version") || strings.Contains(help.String(), "Settings:\n  version") {
+		t.Fatalf("help does not separate version from settings: %q", help.String())
+	}
+	var russianHelp bytes.Buffer
+	printHelp(withSettings(context.Background(), runtimeSettings{Language: languageRussian}), &russianHelp)
+	if !strings.Contains(russianHelp.String(), "\nВерсия:\n  version") || strings.Contains(russianHelp.String(), "Настройки:\n  version") {
+		t.Fatalf("Russian help does not separate version from settings: %q", russianHelp.String())
+	}
 	var commandHelp, commandHelpErrors bytes.Buffer
 	if err := run(context.Background(), []string{"help", "version"}, nil, &commandHelp, &commandHelpErrors); err != nil {
 		t.Fatalf("help version = %v", err)
 	}
 	if !strings.Contains(commandHelp.String(), "--version") {
 		t.Fatalf("version help = %q", commandHelp.String())
+	}
+}
+
+func TestCheckRunsWorkingTreePublicChecksWithoutServer(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-02", 1)
+	writeChecksAndCommit(t, root, `{"schema_version":1,"checks":[{"name":"missing tool","executable":"softpractice-no-such-executable","timeout_seconds":30}]}`)
+	if err := os.WriteFile(filepath.Join(root, ".softpractice", "checks.json"), []byte(`{"schema_version":1,"checks":[{"name":"git version","executable":"git","args":["--version"],"timeout_seconds":30}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	var output, errorOutput bytes.Buffer
+	if err := run(context.Background(), []string{"--api", "://invalid", "check"}, nil, &output, &errorOutput); err != nil {
+		t.Fatalf("check = %v; output=%s", err, &output)
+	}
+	if !strings.Contains(output.String(), "All local public checks passed.") {
+		t.Fatalf("check output = %q", output.String())
+	}
+	var help bytes.Buffer
+	if err := printCommandHelp(context.Background(), &help, "check"); err != nil ||
+		!strings.Contains(help.String(), "including uncommitted changes") || !strings.Contains(help.String(), "Does not submit") {
+		t.Fatalf("check help = %v, %q", err, help.String())
 	}
 }
 
