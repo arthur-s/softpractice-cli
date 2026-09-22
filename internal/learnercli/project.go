@@ -336,6 +336,24 @@ func (c *Client) ResolveProjectRestoreSource(
 	return ProjectRestoreSource{}, errors.New("accepted base submission is unavailable for project restore")
 }
 
+// LatestPracticumSubmission returns the newest submission of the started
+// practicum: the latest one for the current assignment or, before the first
+// submission for it, the accepted predecessor that advanced the workspace.
+// found is false while the workspace still has no submission at all.
+func (c *Client) LatestPracticumSubmission(
+	ctx context.Context,
+	practicumID string,
+) (assignmentID, submissionID string, found bool, err error) {
+	source, err := c.ResolveProjectRestoreSource(ctx, practicumID)
+	if err != nil {
+		return "", "", false, err
+	}
+	if source.Kind != "revision" {
+		return "", "", false, nil
+	}
+	return source.AssignmentID, source.SubmissionID, true, nil
+}
+
 func decodeRestoreLessons(raw json.RawMessage) ([]practicumRestoreLesson, error) {
 	var lessons []practicumRestoreLesson
 	if err := json.Unmarshal(raw, &lessons); err != nil || len(lessons) == 0 {

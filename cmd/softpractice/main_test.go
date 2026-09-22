@@ -471,6 +471,90 @@ func TestSubmissionDownloadCommandSavesOwnedRevisionArchive(t *testing.T) {
 	}
 }
 
+func TestSubmissionShowFallsBackToAcceptedPredecessor(t *testing.T) {
+	workspaceID := uuid.NewString()
+	baseRevisionID := uuid.NewString()
+	acceptedSubmissionID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+	workspace := map[string]any{
+		"id": workspaceID, "project_id": "equipment-rental-python", "state": "active",
+		"base_revision_id": baseRevisionID, "support_mode": nil, "created_at": now, "updated_at": now,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" {
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+			return
+		}
+		switch request.URL.Path {
+		case "/v1/workspaces/" + workspaceID + "/current-assignment":
+			writeTestJSON(writer, map[string]any{
+				"workspace": workspace,
+				"assignment": map[string]any{
+					"id": "pa-foundation-02", "version": 1, "title": "Rental period",
+					"state": "available", "local_checks": testLocalChecks(),
+				},
+				"latest_submission": nil,
+			})
+		case "/v1/practicums":
+			writeTestJSON(writer, map[string]any{"practicums": []any{map[string]any{
+				"id": "equipment-rental-python", "title": "Equipment rental", "can_skip_entry": true,
+				"introduction":       map[string]any{},
+				"first_assignment":   map[string]any{"id": "pa-foundation-01", "title": "Pricing", "version": 2, "estimated_minutes": 25, "learner_surface": "material"},
+				"workspace":          workspace,
+				"current_assignment": map[string]any{"id": "pa-foundation-02", "title": "Rental period", "version": 1, "state": "available"},
+				"lessons": []any{
+					map[string]any{"id": "pa-foundation-01", "version": 2, "state": "accepted", "result_submission_id": acceptedSubmissionID},
+					map[string]any{"id": "pa-foundation-02", "version": 1, "state": "current", "result_submission_id": nil},
+				},
+			}}, "upcoming_practicums": []any{}})
+		case "/v1/submissions/" + acceptedSubmissionID + "/evaluation":
+			writeTestJSON(writer, map[string]any{
+				"submission_id": acceptedSubmissionID, "evaluation_job_id": uuid.NewString(),
+				"job_state": "completed", "attempt": 1, "max_attempts": 3, "updated_at": now,
+				"evaluation": map[string]any{
+					"id": uuid.NewString(), "schema_version": 1,
+					"exercise_id": "pa-foundation-01", "evaluator_version": "test",
+					"profile_id": "local-test", "profile_version": "1",
+					"profile_sha256": strings.Repeat("a", 64),
+					"status":         "accepted", "completed_at": now,
+					"deterministic": map[string]any{"status": "passed", "checks": []any{}},
+					"review": map[string]any{
+						"projection_version": 1, "source_schema_id": "pa-foundation-01-review-v1",
+						"status": "completed", "mode": "llm", "authoritative": true,
+						"verdict": "accept", "summary": "safe feedback", "feedback": []any{},
+					},
+					"recommendation": nil, "evidence": map[string]any{}, "technical_error": nil,
+				},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	repositoryRoot := createLinkedGitRepository(t, workspaceID)
+
+	var output, errorOutput bytes.Buffer
+	if err := submissionCommand(
+		context.Background(), client, repositoryRoot,
+		[]string{"show", "--format", "json"}, &output, &errorOutput,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var payload machineSubmission
+	if err := decodeTestJSON(output.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SubmissionID != acceptedSubmissionID || payload.Evaluation == nil ||
+		payload.Evaluation.Status != "accepted" {
+		t.Fatalf("machine submission = %+v", payload)
+	}
+	if !strings.Contains(errorOutput.String(), "pa-foundation-02 has no submission yet") ||
+		!strings.Contains(errorOutput.String(), "pa-foundation-01") {
+		t.Fatalf("fallback notice = %q", errorOutput.String())
+	}
+}
+
 func TestConfirmationRequiresExplicitInputWhenNonInteractive(t *testing.T) {
 	var output bytes.Buffer
 	if _, err := confirmSubmission(context.Background(), strings.NewReader(""), &output); err == nil {
