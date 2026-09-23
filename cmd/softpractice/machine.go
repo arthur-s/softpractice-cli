@@ -247,14 +247,28 @@ func showSubmission(
 	}
 	submissionID := strings.TrimSpace(*id)
 	if submissionID == "" {
-		_, _, workspace, linkErr := linkedWorkspace(ctx, client, startDirectory, false)
+		_, link, workspace, linkErr := linkedWorkspace(ctx, client, startDirectory, false)
 		if linkErr != nil {
 			return linkErr
 		}
-		if workspace.LatestSubmission == nil {
-			return errors.New("the linked workspace has no submission")
+		if workspace.LatestSubmission != nil {
+			submissionID = workspace.LatestSubmission.ID
+		} else {
+			// An accepted submission advances the workspace, so right after
+			// acceptance the newest submission belongs to the previous lesson.
+			assignmentID, latestID, found, err := client.LatestPracticumSubmission(ctx, link.ProjectID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return errors.New("the linked workspace has no submission")
+			}
+			fmt.Fprintf(errorOutput, text(ctx,
+				"По %s отправок ещё нет; показан принятый результат %s.\n",
+				"%s has no submission yet; showing the accepted %s result.\n",
+			), workspace.Assignment.ID, assignmentID)
+			submissionID = latestID
 		}
-		submissionID = workspace.LatestSubmission.ID
 	}
 	parsedID, err := uuid.Parse(submissionID)
 	if err != nil || parsedID.String() != submissionID {

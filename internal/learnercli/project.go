@@ -176,6 +176,37 @@ type CourseUpdate struct {
 	} `json:"operations"`
 }
 
+// LessonVersionUpdate moves a project from a retired version of its current
+// lesson to the version that replaced it. It replaces only author-owned files
+// the bump changed; a text-only bump has no operations and no archive.
+type LessonVersionUpdate struct {
+	Ref           string `json:"ref"`
+	AssignmentID  string `json:"assignment_id"`
+	FromVersion   int    `json:"from_version"`
+	ToVersion     int    `json:"to_version"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	ArchiveSize   int64  `json:"archive_size"`
+	Files         []struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	} `json:"files"`
+	Operations []struct {
+		Kind string `json:"kind"`
+		Path string `json:"path"`
+	} `json:"operations"`
+}
+
+// LessonVersionUpdate asks for the update from the lesson version this
+// project still holds to the version the workspace is on now.
+func (c *Client) LessonVersionUpdate(ctx context.Context, workspaceID string, fromVersion int) (LessonVersionUpdate, error) {
+	var update LessonVersionUpdate
+	path := fmt.Sprintf("/v1/workspaces/%s/current-assignment/lesson-version-update?from_version=%d", workspaceID, fromVersion)
+	if err := c.AuthorizedJSON(ctx, "GET", path, nil, &update); err != nil {
+		return LessonVersionUpdate{}, err
+	}
+	return update, nil
+}
+
 func (c *Client) PrepareCourseUpdate(ctx context.Context, workspaceID string) (CourseUpdate, error) {
 	var update CourseUpdate
 	if err := c.AuthorizedJSON(ctx, "POST", "/v1/workspaces/"+workspaceID+"/current-assignment/course-update", nil, &update); err != nil {
@@ -334,6 +365,24 @@ func (c *Client) ResolveProjectRestoreSource(
 		return base, nil
 	}
 	return ProjectRestoreSource{}, errors.New("accepted base submission is unavailable for project restore")
+}
+
+// LatestPracticumSubmission returns the newest submission of the started
+// practicum: the latest one for the current assignment or, before the first
+// submission for it, the accepted predecessor that advanced the workspace.
+// found is false while the workspace still has no submission at all.
+func (c *Client) LatestPracticumSubmission(
+	ctx context.Context,
+	practicumID string,
+) (assignmentID, submissionID string, found bool, err error) {
+	source, err := c.ResolveProjectRestoreSource(ctx, practicumID)
+	if err != nil {
+		return "", "", false, err
+	}
+	if source.Kind != "revision" {
+		return "", "", false, nil
+	}
+	return source.AssignmentID, source.SubmissionID, true, nil
 }
 
 func decodeRestoreLessons(raw json.RawMessage) ([]practicumRestoreLesson, error) {

@@ -471,6 +471,90 @@ func TestSubmissionDownloadCommandSavesOwnedRevisionArchive(t *testing.T) {
 	}
 }
 
+func TestSubmissionShowFallsBackToAcceptedPredecessor(t *testing.T) {
+	workspaceID := uuid.NewString()
+	baseRevisionID := uuid.NewString()
+	acceptedSubmissionID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+	workspace := map[string]any{
+		"id": workspaceID, "project_id": "equipment-rental-python", "state": "active",
+		"base_revision_id": baseRevisionID, "support_mode": nil, "created_at": now, "updated_at": now,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" {
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+			return
+		}
+		switch request.URL.Path {
+		case "/v1/workspaces/" + workspaceID + "/current-assignment":
+			writeTestJSON(writer, map[string]any{
+				"workspace": workspace,
+				"assignment": map[string]any{
+					"id": "pa-foundation-02", "version": 1, "title": "Rental period",
+					"state": "available", "local_checks": testLocalChecks(),
+				},
+				"latest_submission": nil,
+			})
+		case "/v1/practicums":
+			writeTestJSON(writer, map[string]any{"practicums": []any{map[string]any{
+				"id": "equipment-rental-python", "title": "Equipment rental", "can_skip_entry": true,
+				"introduction":       map[string]any{},
+				"first_assignment":   map[string]any{"id": "pa-foundation-01", "title": "Pricing", "version": 2, "estimated_minutes": 25, "learner_surface": "material"},
+				"workspace":          workspace,
+				"current_assignment": map[string]any{"id": "pa-foundation-02", "title": "Rental period", "version": 1, "state": "available"},
+				"lessons": []any{
+					map[string]any{"id": "pa-foundation-01", "version": 2, "state": "accepted", "result_submission_id": acceptedSubmissionID},
+					map[string]any{"id": "pa-foundation-02", "version": 1, "state": "current", "result_submission_id": nil},
+				},
+			}}, "upcoming_practicums": []any{}})
+		case "/v1/submissions/" + acceptedSubmissionID + "/evaluation":
+			writeTestJSON(writer, map[string]any{
+				"submission_id": acceptedSubmissionID, "evaluation_job_id": uuid.NewString(),
+				"job_state": "completed", "attempt": 1, "max_attempts": 3, "updated_at": now,
+				"evaluation": map[string]any{
+					"id": uuid.NewString(), "schema_version": 1,
+					"exercise_id": "pa-foundation-01", "evaluator_version": "test",
+					"profile_id": "local-test", "profile_version": "1",
+					"profile_sha256": strings.Repeat("a", 64),
+					"status":         "accepted", "completed_at": now,
+					"deterministic": map[string]any{"status": "passed", "checks": []any{}},
+					"review": map[string]any{
+						"projection_version": 1, "source_schema_id": "pa-foundation-01-review-v1",
+						"status": "completed", "mode": "llm", "authoritative": true,
+						"verdict": "accept", "summary": "safe feedback", "feedback": []any{},
+					},
+					"recommendation": nil, "evidence": map[string]any{}, "technical_error": nil,
+				},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	repositoryRoot := createLinkedGitRepository(t, workspaceID)
+
+	var output, errorOutput bytes.Buffer
+	if err := submissionCommand(
+		context.Background(), client, repositoryRoot,
+		[]string{"show", "--format", "json"}, &output, &errorOutput,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var payload machineSubmission
+	if err := decodeTestJSON(output.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SubmissionID != acceptedSubmissionID || payload.Evaluation == nil ||
+		payload.Evaluation.Status != "accepted" {
+		t.Fatalf("machine submission = %+v", payload)
+	}
+	if !strings.Contains(errorOutput.String(), "pa-foundation-02 has no submission yet") ||
+		!strings.Contains(errorOutput.String(), "pa-foundation-01") {
+		t.Fatalf("fallback notice = %q", errorOutput.String())
+	}
+}
+
 func TestConfirmationRequiresExplicitInputWhenNonInteractive(t *testing.T) {
 	var output bytes.Buffer
 	if _, err := confirmSubmission(context.Background(), strings.NewReader(""), &output); err == nil {
@@ -558,7 +642,22 @@ func TestStarterCommandDownloadsLinksAndInitializesGit(t *testing.T) {
 	}
 }
 
-func TestStarterCommandUsesProjectDefaultDirectoryForFoundation01(t *testing.T) {
+// The entry lesson of every practicum starts the repository the learner keeps,
+// so it is named after the project alone; only a later independent starter
+// carries its lesson suffix.
+func TestStarterCommandUsesProjectDefaultDirectoryForTheEntryLesson(t *testing.T) {
+	for _, test := range []struct{ practicum, first, current, want string }{
+		{"equipment-rental-python", "pa-foundation-01", "pa-foundation-01", "equipment-rental-python"},
+		{"equipment-rental-go", "ga-foundation-01", "ga-foundation-01", "equipment-rental-go"},
+		{"equipment-rental-go", "ga-foundation-01", "ga-foundation-10", "equipment-rental-go-ga-foundation-10"},
+	} {
+		t.Run(test.want, func(t *testing.T) {
+			assertStarterDefaultDirectory(t, test.practicum, test.first, test.current, test.want)
+		})
+	}
+}
+
+func assertStarterDefaultDirectory(t *testing.T, practicumID, firstAssignmentID, currentAssignmentID, want string) {
 	workspaceID := uuid.NewString()
 	starterRoot := t.TempDir()
 	starterContents := []byte("# Starter\n")
@@ -577,10 +676,10 @@ func TestStarterCommandUsesProjectDefaultDirectoryForFoundation01(t *testing.T) 
 		switch request.URL.Path {
 		case "/v1/practicums":
 			writeTestJSON(writer, map[string]any{"practicums": []any{map[string]any{
-				"id": "equipment-rental-python", "title": "Equipment rental",
-				"first_assignment":   map[string]any{"id": "pa-diagnostic-01", "title": "Diagnostic", "version": 1, "estimated_minutes": 35},
-				"workspace":          map[string]any{"id": workspaceID, "project_id": "equipment-rental-python", "state": "active", "base_revision_id": nil, "support_mode": nil, "created_at": time.Now(), "updated_at": time.Now()},
-				"current_assignment": map[string]any{"id": "pa-foundation-01", "title": "Foundation 01", "version": 1, "state": "available", "local_checks": testLocalChecks()},
+				"id": practicumID, "title": "Equipment rental",
+				"first_assignment":   map[string]any{"id": firstAssignmentID, "title": "First", "version": 1, "estimated_minutes": 35},
+				"workspace":          map[string]any{"id": workspaceID, "project_id": practicumID, "state": "active", "base_revision_id": nil, "support_mode": nil, "created_at": time.Now(), "updated_at": time.Now()},
+				"current_assignment": map[string]any{"id": currentAssignmentID, "title": "Current", "version": 1, "state": "available", "local_checks": testLocalChecks()},
 			}}})
 		case "/v1/workspaces/" + workspaceID + "/current-assignment/starter":
 			writer.Header().Set("Content-Type", "application/gzip")
@@ -603,12 +702,12 @@ func TestStarterCommandUsesProjectDefaultDirectoryForFoundation01(t *testing.T) 
 	workdir := t.TempDir()
 	t.Chdir(workdir)
 	var output, errorOutput bytes.Buffer
-	if err := downloadStarter(context.Background(), client, []string{"--practicum", "equipment-rental-python"}, &output, &errorOutput); err != nil {
+	if err := downloadStarter(context.Background(), client, []string{"--practicum", practicumID}, &output, &errorOutput); err != nil {
 		t.Fatal(err)
 	}
-	expected := filepath.Join(workdir, "equipment-rental-python")
+	expected := filepath.Join(workdir, want)
 	if _, err := os.Stat(expected); err != nil {
-		t.Fatalf("assignment-specific starter destination is missing: %v", err)
+		t.Fatalf("starter destination %s is missing: %v", want, err)
 	}
 	if !strings.Contains(output.String(), "Starter project created") {
 		t.Fatalf("output = %q", output.String())
@@ -987,7 +1086,8 @@ func TestCourseUpdateStopsWhenWorktreeChangesDuringDownload(t *testing.T) {
 			Path string `json:"path"`
 		}{{Kind: "add", Path: "lesson_two.py"}},
 	}
-	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":1,"checks":[{"name":"test","executable":"git","args":["--version"],"timeout_seconds":30}]}`))
+	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":1,"checks":[{"name":"test","executable":"git","args":["--version"],"timeout_seconds":30}]}`),
+		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz")
 	if err == nil || !strings.Contains(err.Error(), "working tree changed") {
 		t.Fatalf("update error = %v", err)
 	}
@@ -1226,7 +1326,8 @@ func TestUpdateInvalidChecksLeavesProjectUnchanged(t *testing.T) {
 			Path string `json:"path"`
 		}{{Kind: "add", Path: "lesson_two.py"}},
 	}
-	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":2,"checks":[]}`))
+	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":2,"checks":[]}`),
+		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz")
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("expected unsupported schema: %v", err)
 	}
@@ -1454,5 +1555,242 @@ func TestAutoChecksSettingIsLocalAndNotSubmitted(t *testing.T) {
 	enabled, err = projectAutoChecks(context.Background(), root)
 	if err != nil || enabled {
 		t.Fatalf("disable=%v %v", enabled, err)
+	}
+}
+
+// lessonBumpServer answers for a workspace that a release moved from v1 to v2
+// of the first lesson while the project folder still holds v1.
+func lessonBumpServer(t *testing.T, workspaceID string, extra http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" {
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+			return
+		}
+		if request.URL.Path == "/v1/workspaces/"+workspaceID+"/current-assignment" {
+			writeTestJSON(writer, map[string]any{
+				"workspace": map[string]any{
+					"id": workspaceID, "project_id": "equipment-rental-python", "state": "active",
+					"base_revision_id": nil, "support_mode": nil, "created_at": now, "updated_at": now,
+				},
+				"assignment": map[string]any{
+					"id": "pa-foundation-01", "version": 2, "title": "Pricing",
+					"state": "available", "local_checks": testLocalChecks(),
+				},
+				"latest_submission": nil,
+			})
+			return
+		}
+		extra(writer, request)
+	}))
+}
+
+func commitLearnerWork(t *testing.T, root, name, contents string) string {
+	t.Helper()
+	path := filepath.Join(root, name)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"add", "--all"},
+		{"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "--no-verify", "-m", "work in progress"},
+	} {
+		if output, err := exec.Command("git", append([]string{"-C", root}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	return path
+}
+
+// A text-only bump has an empty lesson version update: `update` rewrites the
+// pin and the public checks in place, downloads nothing, and leaves the
+// learner's unfinished work exactly as it is.
+func TestUpdateRefreshesTheLessonVersionWithoutTouchingLearnerFiles(t *testing.T) {
+	workspaceID := uuid.NewString()
+	server := lessonBumpServer(t, workspaceID, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/workspaces/"+workspaceID+"/current-assignment/lesson-version-update" ||
+			request.URL.Query().Get("from_version") != "1" {
+			http.NotFound(writer, request)
+			return
+		}
+		writeTestJSON(writer, map[string]any{
+			"ref": "pa-foundation-01-v1-to-pa-foundation-01-v2@1.0.0", "assignment_id": "pa-foundation-01",
+			"from_version": 1, "to_version": 2, "archive_size": 0, "files": []any{}, "operations": []any{},
+		})
+	})
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	repositoryRoot := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	learnerFile := commitLearnerWork(t, repositoryRoot, "solution.py", "# unfinished work\n")
+
+	var output bytes.Buffer
+	if err := updateLinkedProject(context.Background(), client, repositoryRoot, "", &output); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(output.String(), "v1 → v2") {
+		t.Fatalf("update output = %q", output.String())
+	}
+	link, err := learnercli.LoadProjectLink(repositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.AssignmentID != "pa-foundation-01" || link.AssignmentVersion != 2 {
+		t.Fatalf("project link = %+v, want the republished version", link)
+	}
+	contents, err := os.ReadFile(learnerFile)
+	if err != nil || string(contents) != "# unfinished work\n" {
+		t.Fatalf("learner file = %q, %v", contents, err)
+	}
+}
+
+// A bump that refactored author-owned files ships them in the lesson version
+// update. `update` replaces exactly those files and nothing the learner wrote.
+func TestUpdateReplacesRefactoredAuthorFilesAndKeepsLearnerWork(t *testing.T) {
+	workspaceID := uuid.NewString()
+	payloadRoot := t.TempDir()
+	refactored := []byte("# refactored author module\n")
+	if err := os.WriteFile(filepath.Join(payloadRoot, "main.py"), refactored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(refactored)
+	var archive bytes.Buffer
+	metadata, err := starterbundle.Build(payloadRoot, []starterbundle.File{
+		{Path: "main.py", SHA256: hex.EncodeToString(digest[:])},
+	}, &archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ref = "pa-foundation-01-v1-to-pa-foundation-01-v2@1.0.0"
+	server := lessonBumpServer(t, workspaceID, func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/workspaces/" + workspaceID + "/current-assignment/lesson-version-update":
+			writeTestJSON(writer, map[string]any{
+				"ref": ref, "assignment_id": "pa-foundation-01", "from_version": 1, "to_version": 2,
+				"archive_sha256": metadata.SHA256, "archive_size": metadata.Size,
+				"files":      []any{map[string]any{"path": "main.py", "sha256": hex.EncodeToString(digest[:])}},
+				"operations": []any{map[string]any{"kind": "replace", "path": "main.py"}},
+			})
+		case "/v1/workspaces/" + workspaceID + "/current-assignment/lesson-version-update/archive":
+			if request.URL.Query().Get("from_version") != "1" {
+				http.NotFound(writer, request)
+				return
+			}
+			writer.Header().Set("Content-Type", "application/gzip")
+			writer.Header().Set("Content-Length", fmt.Sprint(metadata.Size))
+			writer.Header().Set("X-Softpractice-Course-Update-SHA256", metadata.SHA256)
+			writer.Header().Set("X-Softpractice-Course-Update-Ref", ref)
+			_, _ = writer.Write(archive.Bytes())
+		default:
+			http.NotFound(writer, request)
+		}
+	})
+	defer server.Close()
+	client := savedTestClient(t, server.URL)
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	if output, err := exec.Command("git", "-C", root, "update-index", "--assume-unchanged", ".softpractice/project.json").CombinedOutput(); err != nil {
+		t.Fatalf("ignore local project link in test repository: %v: %s", err, output)
+	}
+	learnerFile := commitLearnerWork(t, root, "solution.py", "# unfinished work\n")
+
+	var output bytes.Buffer
+	if err := updateLinkedProject(context.Background(), client, root, "", &output); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "main.py")); err != nil || string(content) != string(refactored) {
+		t.Fatalf("author file = %q, %v; want the refactored bytes", content, err)
+	}
+	if content, err := os.ReadFile(learnerFile); err != nil || string(content) != "# unfinished work\n" {
+		t.Fatalf("learner file = %q, %v", content, err)
+	}
+	link, err := learnercli.LoadProjectLink(root)
+	if err != nil || link.AssignmentVersion != 2 {
+		t.Fatalf("project link = %+v, %v", link, err)
+	}
+	if !strings.Contains(output.String(), "v1 → v2") || !strings.Contains(output.String(), "main.py") {
+		t.Fatalf("update output = %q", output.String())
+	}
+	repository, err := inspectGitRepository(context.Background(), root, false)
+	if err != nil || !repository.Clean {
+		t.Fatalf("updated project is not clean: %+v, %v", repository, err)
+	}
+}
+
+// A lesson version update never carries anything but replacements of lesson
+// files; anything else leaves the project untouched.
+func TestUpdateRefusesALessonVersionUpdateThatAddsFiles(t *testing.T) {
+	workspaceID := uuid.NewString()
+	server := lessonBumpServer(t, workspaceID, func(writer http.ResponseWriter, request *http.Request) {
+		writeTestJSON(writer, map[string]any{
+			"ref": "pa-foundation-01-v1-to-pa-foundation-01-v2@1.0.0", "assignment_id": "pa-foundation-01",
+			"from_version": 1, "to_version": 2, "archive_sha256": strings.Repeat("a", 64), "archive_size": 10,
+			"files":      []any{map[string]any{"path": "extra.py", "sha256": strings.Repeat("b", 64)}},
+			"operations": []any{map[string]any{"kind": "add", "path": "extra.py"}},
+		})
+	})
+	defer server.Close()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	var output bytes.Buffer
+	err := updateLinkedProject(context.Background(), savedTestClient(t, server.URL), root, "", &output)
+	if err == nil {
+		t.Fatal("a lesson version update that adds files was applied")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "extra.py")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("extra file exists: %v", statErr)
+	}
+}
+
+// A folder still on the retired version submits the version its tree was
+// made for: the server picks the profile that accepts that tree, and the
+// learner is told an update exists without being blocked by it.
+func TestSubmitFromRetiredVersionNamesTheTreeVersionAndPrintsTheNotice(t *testing.T) {
+	workspaceID := uuid.NewString()
+	var submittedVersion string
+	server := lessonBumpServer(t, workspaceID, func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/workspaces/"+workspaceID+"/assignments/pa-foundation-01/submissions" {
+			http.NotFound(writer, request)
+			return
+		}
+		submittedVersion = request.Header.Get("X-Softpractice-Assignment-Version")
+		_, _ = io.Copy(io.Discard, request.Body)
+		submissionID := uuid.NewString()
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"submission_id": submissionID, "revision_id": uuid.NewString(), "evaluation_job_id": uuid.NewString(),
+			"job_state": "queued", "replayed": false, "submitted_at": time.Now().UTC(),
+			"submission_url": "/v1/submissions/" + submissionID, "evaluation_url": "/v1/submissions/" + submissionID + "/evaluation",
+			"lesson_update": map[string]any{"assignment_id": "pa-foundation-01", "submitted_version": 1, "current_version": 2},
+		})
+	})
+	defer server.Close()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	var output, errorOutput bytes.Buffer
+	err := submit(context.Background(), savedTestClient(t, server.URL), root, []string{"--yes"},
+		strings.NewReader(""), &output, &errorOutput)
+	if err != nil {
+		t.Fatalf("submit from the retired version: %v\n%s", err, errorOutput.String())
+	}
+	if submittedVersion != "1" {
+		t.Fatalf("submitted assignment version = %q, want the version of the tree", submittedVersion)
+	}
+	if !strings.Contains(output.String(), "v1 → v2") || !strings.Contains(output.String(), "softpractice update") {
+		t.Fatalf("submit output = %q, want the lesson update notice", output.String())
+	}
+}
+
+// Only a pin older than the server's version is a republished lesson; a newer
+// pin (rolled-back release, edited link) must not be offered as an update.
+func TestPendingLessonVersionOnlyForAnOlderPin(t *testing.T) {
+	link := learnercli.ProjectLink{SchemaVersion: 2, AssignmentID: "ga-foundation-01", AssignmentVersion: 1}
+	var workspace learnercli.WorkspaceStatus
+	workspace.Assignment.ID, workspace.Assignment.Version = "ga-foundation-01", 2
+	if !pendingLessonVersion(link, workspace) {
+		t.Fatal("older pin is not reported as a lesson update")
+	}
+	link.AssignmentVersion = 3
+	if pendingLessonVersion(link, workspace) {
+		t.Fatal("newer pin is reported as a lesson update")
 	}
 }
