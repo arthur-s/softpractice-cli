@@ -48,14 +48,21 @@ type currentUser struct {
 }
 
 type submissionReceipt struct {
-	SubmissionID    string    `json:"submission_id"`
-	JobState        string    `json:"job_state"`
-	Replayed        bool      `json:"replayed"`
-	SubmissionURL   string    `json:"submission_url"`
-	EvaluationURL   string    `json:"evaluation_url"`
-	RevisionID      string    `json:"revision_id"`
-	EvaluationJobID string    `json:"evaluation_job_id"`
-	SubmittedAt     time.Time `json:"submitted_at"`
+	LessonUpdate    *lessonUpdateNotice `json:"lesson_update"`
+	SubmissionID    string              `json:"submission_id"`
+	JobState        string              `json:"job_state"`
+	Replayed        bool                `json:"replayed"`
+	SubmissionURL   string              `json:"submission_url"`
+	EvaluationURL   string              `json:"evaluation_url"`
+	RevisionID      string              `json:"revision_id"`
+	EvaluationJobID string              `json:"evaluation_job_id"`
+	SubmittedAt     time.Time           `json:"submitted_at"`
+}
+
+type lessonUpdateNotice struct {
+	AssignmentID     string `json:"assignment_id"`
+	SubmittedVersion int    `json:"submitted_version"`
+	CurrentVersion   int    `json:"current_version"`
 }
 
 // printVersion reports the version this binary was built with. A build made
@@ -489,11 +496,12 @@ func downloadStarter(ctx context.Context, client *learnercli.Client, args []stri
 	}
 	target := *directory
 	if target == "" {
-		// Foundation 01 begins the repository which the learner carries through
-		// the course. Later independent starters retain their lesson suffix so a
-		// fallback download cannot overwrite that ongoing project.
+		// The practicum's entry lesson begins the repository which the learner
+		// carries through the course, so it is named after the project alone in
+		// every practicum. Later independent starters retain their lesson suffix
+		// so a fallback download cannot overwrite that ongoing project.
 		target = practicum.Workspace.ProjectID
-		if practicum.CurrentAssignment.ID != "pa-foundation-01" {
+		if practicum.CurrentAssignment.ID != practicum.FirstAssignment.ID {
 			target += "-" + practicum.CurrentAssignment.ID
 		}
 	}
@@ -641,6 +649,9 @@ func updateLinkedProject(
 	if workspace.Workspace.State != "active" {
 		return fmt.Errorf(text(ctx, "workspace находится в состоянии %s и не имеет обновления курса", "workspace is %s and has no course update"), workspace.Workspace.State)
 	}
+	if pendingLessonVersion(link, workspace) {
+		return updateLessonVersion(ctx, client, repository.Root, link, workspace, output)
+	}
 	if link.SchemaVersion == 2 && workspace.Assignment.ID == link.AssignmentID && workspace.Assignment.Version == link.AssignmentVersion {
 		checksPath := filepath.Join(repository.Root, filepath.FromSlash(localchecks.RelativePath))
 		if _, statErr := os.Stat(checksPath); errors.Is(statErr, os.ErrNotExist) {
@@ -663,7 +674,12 @@ func updateLinkedProject(
 	if err != nil {
 		return fmt.Errorf("prepare course update: %w", err)
 	}
-	if (link.SchemaVersion == 2 && (update.FromAssignmentID != link.AssignmentID || update.FromAssignmentVersion != link.AssignmentVersion)) ||
+	// The transition may start from a newer version of the lesson this folder
+	// holds: the lesson was republished after this tree was made, and the tree
+	// was accepted on its own version. The server offers that only when the
+	// transition itself replaces every lesson file the republication changed;
+	// the base content check below still pins the exact accepted tree.
+	if (link.SchemaVersion == 2 && (update.FromAssignmentID != link.AssignmentID || update.FromAssignmentVersion < link.AssignmentVersion)) ||
 		update.ToAssignmentID != workspace.Assignment.ID || update.ToAssignmentVersion != workspace.Assignment.Version {
 		return errors.New(text(ctx, "сервер вернул обновление для другого урока; проект не изменён", "server returned a course update for a different lesson; project was left unchanged"))
 	}
@@ -680,7 +696,8 @@ func updateLinkedProject(
 		// `project restore`, not a folder the learner is working in.
 		return courseUpdateMismatchError(ctx, repository, update, startDirectory != "")
 	}
-	if err := downloadAndApplyCourseUpdate(ctx, client, repository.Root, link, update, workspace.Assignment.LocalChecks); err != nil {
+	archivePath := "/v1/workspaces/" + link.WorkspaceID + "/current-assignment/course-update/archive?format=tar.gz"
+	if err := downloadAndApplyCourseUpdate(ctx, client, repository.Root, link, update, workspace.Assignment.LocalChecks, archivePath); err != nil {
 		return err
 	}
 	fmt.Fprintf(output, text(ctx, "Проект курса обновлён в этой папке: %s\n", "Course project updated in place: %s\n"), repository.Root)
@@ -697,6 +714,7 @@ func downloadAndApplyCourseUpdate(
 	link learnercli.ProjectLink,
 	update learnercli.CourseUpdate,
 	localChecks []byte,
+	archiveURLPath string,
 ) error {
 	archive, err := os.CreateTemp("", "softpractice-course-update-*.tar.gz")
 	if err != nil {
@@ -704,8 +722,7 @@ func downloadAndApplyCourseUpdate(
 	}
 	archivePath := archive.Name()
 	defer os.Remove(archivePath)
-	metadata, downloadErr := client.DownloadCourseUpdate(ctx,
-		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz", archive)
+	metadata, downloadErr := client.DownloadCourseUpdate(ctx, archiveURLPath, archive)
 	closeErr := archive.Close()
 	if downloadErr != nil || closeErr != nil {
 		return fmt.Errorf("download course update: %w", errors.Join(downloadErr, closeErr))
@@ -1112,6 +1129,95 @@ func safeProjectRelativePath(value string) bool {
 	return true
 }
 
+// updateLessonVersion moves this folder from a retired version of its lesson
+// to the version that replaced it. The update replaces only author-owned files
+// the bump changed and never the learner's work. It is voluntary: a folder on
+// the retired version can still submit until the lesson ends.
+func updateLessonVersion(
+	ctx context.Context,
+	client *learnercli.Client,
+	root string,
+	link learnercli.ProjectLink,
+	workspace learnercli.WorkspaceStatus,
+	output io.Writer,
+) error {
+	update, err := client.LessonVersionUpdate(ctx, link.WorkspaceID, link.AssignmentVersion)
+	if err != nil {
+		return fmt.Errorf("prepare lesson version update: %w", err)
+	}
+	if update.AssignmentID != link.AssignmentID || update.FromVersion != link.AssignmentVersion ||
+		update.ToVersion != workspace.Assignment.Version {
+		return errors.New(text(ctx, "сервер вернул обновление для другого урока; проект не изменён", "server returned a course update for a different lesson; project was left unchanged"))
+	}
+	if len(update.Operations) == 0 {
+		return refreshLessonVersion(ctx, root, link, workspace, output)
+	}
+	replaced := make([]string, 0, len(update.Operations))
+	for _, operation := range update.Operations {
+		if operation.Kind != "replace" {
+			return errors.New(text(ctx, "обновление урока может только заменять файлы урока; проект не изменён", "a lesson update may only replace lesson files; project was left unchanged"))
+		}
+		replaced = append(replaced, operation.Path)
+	}
+	courseUpdate := learnercli.CourseUpdate{
+		Ref:              update.Ref,
+		FromAssignmentID: update.AssignmentID, FromAssignmentVersion: update.FromVersion,
+		ToAssignmentID: update.AssignmentID, ToAssignmentVersion: update.ToVersion,
+		ArchiveSHA256: update.ArchiveSHA256, ArchiveSize: update.ArchiveSize,
+		Files: update.Files, Operations: update.Operations,
+	}
+	archivePath := fmt.Sprintf("/v1/workspaces/%s/current-assignment/lesson-version-update/archive?from_version=%d&format=tar.gz",
+		link.WorkspaceID, link.AssignmentVersion)
+	if err := downloadAndApplyCourseUpdate(ctx, client, root, link, courseUpdate, workspace.Assignment.LocalChecks, archivePath); err != nil {
+		return err
+	}
+	fmt.Fprintf(output,
+		text(ctx, "Урок %s обновлён: v%d → v%d. Заменены файлы урока: %s. Ваши файлы не изменены; посмотрите обновлённое задание и продолжайте.\n",
+			"Lesson %s updated: v%d → v%d. Lesson files replaced: %s. Your files are unchanged; review the updated assignment and continue.\n"),
+		link.AssignmentID, update.FromVersion, update.ToVersion, strings.Join(replaced, ", "))
+	return nil
+}
+
+// refreshLessonVersion moves this folder onto the republished version of the
+// lesson it already holds when the bump changed no project file. There is no
+// archive to apply: the learner's work stays exactly as it is and only the pin
+// and the public checks are rewritten.
+func refreshLessonVersion(
+	ctx context.Context,
+	root string,
+	link learnercli.ProjectLink,
+	workspace learnercli.WorkspaceStatus,
+	output io.Writer,
+) error {
+	previousVersion := link.AssignmentVersion
+	link.AssignmentVersion = workspace.Assignment.Version
+	if err := writeLocalChecks(root, workspace.Assignment.LocalChecks); err != nil {
+		return err
+	}
+	if err := writeProjectLink(root, link); err != nil {
+		return err
+	}
+	// The pin itself is not tracked by Git. The public checks are, and a purely
+	// editorial revision often leaves them byte-identical, so commit only when
+	// this rewrite actually changed the working tree.
+	clean, err := gitWorktreeIsClean(ctx, root)
+	if err != nil {
+		return err
+	}
+	if !clean {
+		if err := commitLocalChecks(ctx, root, "Update Softpractice lesson version"); err != nil {
+			return err
+		}
+	}
+	fmt.Fprintf(
+		output,
+		text(ctx, "Урок %s обновлён: v%d → v%d. Ваши файлы не изменены; посмотрите обновлённое задание и продолжайте.\n",
+			"Lesson %s updated: v%d → v%d. Your files are unchanged; review the updated assignment and continue.\n"),
+		link.AssignmentID, previousVersion, link.AssignmentVersion,
+	)
+	return nil
+}
+
 func writeProjectLink(root string, link learnercli.ProjectLink) error {
 	path := filepath.Join(root, ".softpractice", "project.json")
 	data := []byte(fmt.Sprintf("{\n  \"schema_version\": %d,\n  \"workspace_id\": %q,\n  \"project_id\": %q,\n  \"assignment_id\": %q,\n  \"assignment_version\": %d\n}\n", link.SchemaVersion, link.WorkspaceID, link.ProjectID, link.AssignmentID, link.AssignmentVersion))
@@ -1314,6 +1420,16 @@ func status(
 		workspace.Assignment.Title,
 		workspace.Assignment.State,
 	)
+	if pendingLessonVersion(link, workspace) {
+		// A newer version of this lesson is published. The folder can still
+		// submit on its own version; `update` moves it when the learner chooses.
+		fmt.Fprintf(
+			output,
+			text(ctx, "Урок обновлён: %s v%d → v%d. Отправлять решение можно и сейчас; перейти на новую версию: `softpractice update`\n",
+				"Lesson updated: %s v%d → v%d. You can still submit now; to move to the new version: `softpractice update`\n"),
+			link.AssignmentID, link.AssignmentVersion, workspace.Assignment.Version,
+		)
+	}
 	if pendingTransition(link, workspace) {
 		// The server has already opened the next lesson while this folder is
 		// still on the previous one. Without this line `Assignment` names a
@@ -1354,9 +1470,17 @@ func status(
 // while this folder still holds the previous one. A v1 link pins no lesson, so
 // it can never be compared this way.
 func pendingTransition(link learnercli.ProjectLink, workspace learnercli.WorkspaceStatus) bool {
-	return link.SchemaVersion == 2 &&
-		(link.AssignmentID != workspace.Assignment.ID ||
-			link.AssignmentVersion != workspace.Assignment.Version)
+	return link.SchemaVersion == 2 && link.AssignmentID != workspace.Assignment.ID
+}
+
+// pendingLessonVersion reports whether this folder still names a version of
+// the current lesson that the catalog has replaced. The learner keeps their
+// work: only the pin and the public checks are refreshed.
+func pendingLessonVersion(link learnercli.ProjectLink, workspace learnercli.WorkspaceStatus) bool {
+	// Only an older pin is a republished lesson. A pin newer than the server
+	// (a rolled-back release, a hand-edited link) is not an update to offer.
+	return link.SchemaVersion == 2 && link.AssignmentID == workspace.Assignment.ID &&
+		link.AssignmentVersion < workspace.Assignment.Version
 }
 
 func submit(
@@ -1399,7 +1523,7 @@ func submit(
 		text(ctx, "Проект: %s\nУрок: %s v%d — %s\n\n", "Project: %s\nAssignment: %s v%d — %s\n\n"),
 		link.ProjectID,
 		workspace.Assignment.ID,
-		workspace.Assignment.Version,
+		submittedLessonVersion(link, workspace),
 		workspace.Assignment.Title,
 	)
 	fmt.Fprintf(
@@ -1474,7 +1598,28 @@ func submit(
 		replay,
 		receipt.JobState,
 	)
+	if update := receipt.LessonUpdate; update != nil {
+		// The submission is accepted and evaluated as usual. The notice only
+		// says a newer version exists; updating stays the learner's choice.
+		fmt.Fprintf(
+			output,
+			text(ctx, "\nУрок обновлён: %s v%d → v%d. Решение принято и проверяется как обычно. Чтобы перейти на новую версию, выполните `softpractice update`.\n",
+				"\nLesson updated: %s v%d → v%d. Your submission is accepted and evaluated as usual. To move to the new version, run `softpractice update`.\n"),
+			update.AssignmentID, update.SubmittedVersion, update.CurrentVersion,
+		)
+	}
 	return nil
+}
+
+// submittedLessonVersion is the lesson version this folder's tree was made
+// for. After a version bump the server has moved on, but the tree has not
+// until `softpractice update`, and the server picks the evaluation profile
+// that accepts this tree from the version it names.
+func submittedLessonVersion(link learnercli.ProjectLink, workspace learnercli.WorkspaceStatus) int {
+	if pendingLessonVersion(link, workspace) {
+		return link.AssignmentVersion
+	}
+	return workspace.Assignment.Version
 }
 
 func submissionRequest(
@@ -1486,12 +1631,13 @@ func submissionRequest(
 	if workspace.Workspace.BaseRevisionID != nil {
 		baseRevisionID = *workspace.Workspace.BaseRevisionID
 	}
+	version := submittedLessonVersion(link, workspace)
 	idempotencyKey := uuid.NewSHA1(
 		submissionNamespace,
 		[]byte(
 			link.WorkspaceID+"\x00"+
 				workspace.Assignment.ID+"\x00"+
-				fmt.Sprint(workspace.Assignment.Version)+"\x00"+
+				fmt.Sprint(version)+"\x00"+
 				baseRevisionID+"\x00"+
 				commitSHA,
 		),
@@ -1499,7 +1645,7 @@ func submissionRequest(
 	headers := map[string]string{
 		"Idempotency-Key":                   idempotencyKey,
 		"X-Softpractice-Commit-SHA":         commitSHA,
-		"X-Softpractice-Assignment-Version": fmt.Sprint(workspace.Assignment.Version),
+		"X-Softpractice-Assignment-Version": fmt.Sprint(version),
 		"X-Softpractice-CLI-Version":        cliVersion,
 	}
 	if baseRevisionID != "" {

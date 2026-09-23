@@ -176,6 +176,37 @@ type CourseUpdate struct {
 	} `json:"operations"`
 }
 
+// LessonVersionUpdate moves a project from a retired version of its current
+// lesson to the version that replaced it. It replaces only author-owned files
+// the bump changed; a text-only bump has no operations and no archive.
+type LessonVersionUpdate struct {
+	Ref           string `json:"ref"`
+	AssignmentID  string `json:"assignment_id"`
+	FromVersion   int    `json:"from_version"`
+	ToVersion     int    `json:"to_version"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	ArchiveSize   int64  `json:"archive_size"`
+	Files         []struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	} `json:"files"`
+	Operations []struct {
+		Kind string `json:"kind"`
+		Path string `json:"path"`
+	} `json:"operations"`
+}
+
+// LessonVersionUpdate asks for the update from the lesson version this
+// project still holds to the version the workspace is on now.
+func (c *Client) LessonVersionUpdate(ctx context.Context, workspaceID string, fromVersion int) (LessonVersionUpdate, error) {
+	var update LessonVersionUpdate
+	path := fmt.Sprintf("/v1/workspaces/%s/current-assignment/lesson-version-update?from_version=%d", workspaceID, fromVersion)
+	if err := c.AuthorizedJSON(ctx, "GET", path, nil, &update); err != nil {
+		return LessonVersionUpdate{}, err
+	}
+	return update, nil
+}
+
 func (c *Client) PrepareCourseUpdate(ctx context.Context, workspaceID string) (CourseUpdate, error) {
 	var update CourseUpdate
 	if err := c.AuthorizedJSON(ctx, "POST", "/v1/workspaces/"+workspaceID+"/current-assignment/course-update", nil, &update); err != nil {
