@@ -79,6 +79,8 @@ softpractice update
 | `softpractice check` | Run public checks against the current working tree |
 | `softpractice submit` | Submit the current committed Git revision |
 | `softpractice submission show` | Show the latest submission and review result |
+| `softpractice evaluation` | Show the evaluation result of the latest submission; `--wait` waits for it |
+| `softpractice assignment show` | Show the assignment this project is working on |
 | `softpractice update` | Apply the transition to the next lesson, or move to a newer version of the current lesson (replaces only lesson files, never yours; optional until the lesson ends) |
 | `softpractice open` | Open the workspace or latest result in the browser |
 | `softpractice project restore` | Restore a project from the latest usable revision |
@@ -107,6 +109,20 @@ softpractice set auto-checks true
 `softpractice submit --checks` enables the same pre-submission check for one
 run. Unlike `softpractice check`, submission checks require a clean working
 tree and run in an isolated snapshot of `HEAD`.
+
+## Machine-readable output
+
+`status`, `submission show`, `evaluation`, and `assignment show` accept
+`--format json`. Each document has `contract_version` and `kind`.
+
+```bash
+softpractice evaluation --wait --timeout 10m --format json
+```
+
+`evaluation` exit codes: `0` result ready, `1` error, `3` not ready yet,
+`4` evaluation superseded, no result. Its output has the verdict, the
+automated check results, and the number and priorities of reviewer findings,
+without the reviewer's recommendations; the full review is at `result_url`.
 
 ## Language
 

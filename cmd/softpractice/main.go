@@ -93,6 +93,10 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
+		var status exitStatus
+		if errors.As(err, &status) {
+			os.Exit(int(status))
+		}
 		fmt.Fprintln(os.Stderr, "softpractice:", err)
 		os.Exit(1)
 	}
@@ -216,6 +220,10 @@ func run(
 		return status(ctx, client, "", remaining[1:], output, errorOutput)
 	case "submission":
 		return submissionCommand(ctx, client, "", remaining[1:], output, errorOutput)
+	case "evaluation":
+		return evaluationCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
+	case "assignment":
+		return assignmentCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
 	case "project":
 		return projectCommand(ctx, client, remaining[1:], output, errorOutput)
 	case "starter":
