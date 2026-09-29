@@ -50,6 +50,7 @@ type machineStatus struct {
 	Assignment struct {
 		ID      string `json:"id"`
 		Version int    `json:"version"`
+		Title   string `json:"title"`
 		State   string `json:"state"`
 	} `json:"assignment"`
 	Local struct {
@@ -59,8 +60,17 @@ type machineStatus struct {
 	// Transition is present only while the server has already opened the next
 	// lesson and this folder still holds the previous one. It is additive: a
 	// contract_version 1 reader that ignores unknown keys is unaffected.
-	Transition       *machineTransition        `json:"transition,omitempty"`
-	LatestSubmission *machineSubmissionSummary `json:"latest_submission"`
+	Transition *machineTransition `json:"transition,omitempty"`
+	// LessonVersionUpdate is present while the server publishes a newer
+	// version of the lesson this folder holds. Additive like Transition.
+	LessonVersionUpdate *machineLessonVersionUpdate `json:"lesson_version_update,omitempty"`
+	LatestSubmission    *machineSubmissionSummary   `json:"latest_submission"`
+}
+
+type machineLessonVersionUpdate struct {
+	AssignmentID string `json:"assignment_id"`
+	FromVersion  int    `json:"from_version"`
+	ToVersion    int    `json:"to_version"`
 }
 
 type machineTransition struct {
@@ -75,15 +85,13 @@ type machineSubmissionSummary struct {
 	RevisionID  string    `json:"revision_id"`
 	JobState    string    `json:"job_state"`
 	SubmittedAt time.Time `json:"submitted_at"`
+	// EvaluationStatus is the evaluation result status (accepted, revise,
+	// ...) once the job is terminal; omitted while it is not.
+	EvaluationStatus string `json:"evaluation_status,omitempty"`
 }
 
-func writeStatusJSON(
-	output io.Writer,
-	user currentUser,
-	link learnercli.ProjectLink,
-	workspace learnercli.WorkspaceStatus,
-	repository gitRepository,
-) error {
+func writeStatusJSON(output io.Writer, snapshot statusSnapshot) error {
+	user, link, workspace, repository := snapshot.User, snapshot.Link, snapshot.Workspace, snapshot.Repository
 	payload := machineStatus{ContractVersion: 1, Kind: "softpractice.status"}
 	payload.Account.ID = user.ID
 	payload.Account.EmailVerified = user.EmailVerified
@@ -92,6 +100,7 @@ func writeStatusJSON(
 	payload.Workspace.State = workspace.Workspace.State
 	payload.Assignment.ID = workspace.Assignment.ID
 	payload.Assignment.Version = workspace.Assignment.Version
+	payload.Assignment.Title = workspace.Assignment.Title
 	payload.Assignment.State = workspace.Assignment.State
 	payload.Local.Head = repository.CommitSHA
 	payload.Local.Clean = repository.Clean
@@ -101,11 +110,18 @@ func writeStatusJSON(
 			ToAssignmentID: workspace.Assignment.ID, ToAssignmentVersion: workspace.Assignment.Version,
 		}
 	}
+	if pendingLessonVersion(link, workspace) {
+		payload.LessonVersionUpdate = &machineLessonVersionUpdate{
+			AssignmentID: link.AssignmentID,
+			FromVersion:  link.AssignmentVersion, ToVersion: workspace.Assignment.Version,
+		}
+	}
 	if workspace.LatestSubmission != nil {
 		payload.LatestSubmission = &machineSubmissionSummary{
 			ID: workspace.LatestSubmission.ID, RevisionID: workspace.LatestSubmission.RevisionID,
-			JobState:    workspace.LatestSubmission.JobState,
-			SubmittedAt: workspace.LatestSubmission.SubmittedAt,
+			JobState:         workspace.LatestSubmission.JobState,
+			SubmittedAt:      workspace.LatestSubmission.SubmittedAt,
+			EvaluationStatus: snapshot.LatestEvaluationStatus,
 		}
 	}
 	return writeMachineJSON(output, payload)
@@ -246,29 +262,19 @@ func showSubmission(
 		}
 	}
 	submissionID := strings.TrimSpace(*id)
+	useCases := newLearnerUseCases(client, startDirectory)
 	if submissionID == "" {
-		_, link, workspace, linkErr := linkedWorkspace(ctx, client, startDirectory, false)
-		if linkErr != nil {
-			return linkErr
+		latest, err := useCases.LatestSubmission(ctx)
+		if err != nil {
+			return err
 		}
-		if workspace.LatestSubmission != nil {
-			submissionID = workspace.LatestSubmission.ID
-		} else {
-			// An accepted submission advances the workspace, so right after
-			// acceptance the newest submission belongs to the previous lesson.
-			assignmentID, latestID, found, err := client.LatestPracticumSubmission(ctx, link.ProjectID)
-			if err != nil {
-				return err
-			}
-			if !found {
-				return errors.New("the linked workspace has no submission")
-			}
+		if latest.PredecessorAssignmentID != "" {
 			fmt.Fprintf(errorOutput, text(ctx,
 				"По %s отправок ещё нет; показан принятый результат %s.\n",
 				"%s has no submission yet; showing the accepted %s result.\n",
-			), workspace.Assignment.ID, assignmentID)
-			submissionID = latestID
+			), latest.CurrentAssignmentID, latest.PredecessorAssignmentID)
 		}
+		submissionID = latest.SubmissionID
 	}
 	parsedID, err := uuid.Parse(submissionID)
 	if err != nil || parsedID.String() != submissionID {

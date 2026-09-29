@@ -628,7 +628,7 @@ func updateProject(ctx context.Context, client *learnercli.Client, args []string
 	if flags.NArg() != 0 {
 		return errors.New(text(ctx, "использование: softpractice update", "usage: softpractice update"))
 	}
-	return updateLinkedProject(ctx, client, "", "", output)
+	return newLearnerUseCases(client, "").Update(ctx, output)
 }
 
 func updateLinkedProject(
@@ -1394,17 +1394,14 @@ func status(
 	if err != nil {
 		return err
 	}
-	repository, link, workspace, err := linkedWorkspace(ctx, client, startDirectory, false)
+	snapshot, err := newLearnerUseCases(client, startDirectory).Status(ctx, outputFormat == outputFormatJSON)
 	if err != nil {
 		return err
 	}
-	var user currentUser
-	if err := client.AuthorizedJSON(ctx, "GET", "/v1/me", nil, &user); err != nil {
-		return err
-	}
 	if outputFormat == outputFormatJSON {
-		return writeStatusJSON(output, user, link, workspace, repository)
+		return writeStatusJSON(output, snapshot)
 	}
+	repository, link, workspace, user := snapshot.Repository, snapshot.Link, snapshot.Workspace, snapshot.User
 	clean := text(ctx, "чистое", "clean")
 	if !repository.Clean {
 		clean = text(ctx, "есть незакоммиченные или неотслеживаемые изменения", "has uncommitted or untracked changes")
@@ -1501,23 +1498,13 @@ func submit(
 	if flags.NArg() != 0 {
 		return errors.New(text(ctx, "использование: softpractice submit [--yes]", "usage: softpractice submit [--yes]"))
 	}
-	repository, link, workspace, err := linkedWorkspace(ctx, client, startDirectory, true)
+	useCases := newLearnerUseCases(client, startDirectory)
+	prepared, err := useCases.PrepareSubmission(ctx)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(repository.ArchivePath)
-	if !repository.Clean {
-		return errors.New(text(ctx, "рабочее дерево не чистое; сделайте commit всех изменений перед отправкой", "working tree is not clean; commit all changes before submitting"))
-	}
-	if workspace.Workspace.State != "active" {
-		return fmt.Errorf(text(ctx, "workspace находится в состоянии %s и не принимает отправки", "workspace is %s and cannot accept a submission"), workspace.Workspace.State)
-	}
-	if workspace.Assignment.State != "available" && workspace.Assignment.State != "submitted" {
-		return fmt.Errorf(
-			text(ctx, "урок находится в состоянии %s и не принимает отправки", "assignment is %s and cannot accept a submission"),
-			workspace.Assignment.State,
-		)
-	}
+	defer prepared.Close()
+	repository, link, workspace := prepared.Repository, prepared.Link, prepared.Workspace
 	fmt.Fprintf(
 		output,
 		text(ctx, "Проект: %s\nУрок: %s v%d — %s\n\n", "Project: %s\nAssignment: %s v%d — %s\n\n"),
@@ -1565,27 +1552,9 @@ func submit(
 			return nil
 		}
 	}
-	requestPath, headers, idempotencyKey := submissionRequest(
-		link,
-		workspace,
-		repository.CommitSHA,
-	)
-	var receipt submissionReceipt
-	err = client.Submit(
-		ctx,
-		requestPath,
-		repository.ArchivePath,
-		headers,
-		&receipt,
-	)
+	receipt, err := useCases.SendSubmission(ctx, prepared)
 	if err != nil {
-		return fmt.Errorf(
-			"submit %s at %s (idempotency key %s): %w",
-			repository.Root,
-			repository.CommitSHA,
-			idempotencyKey,
-			err,
-		)
+		return err
 	}
 	replay := ""
 	if receipt.Replayed {
