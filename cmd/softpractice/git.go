@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 )
 
+var errNotGitRepository = errors.New("current directory is not a Git repository")
+
 type gitRepository struct {
 	Root            string
 	CommitSHA       string
@@ -38,7 +40,7 @@ func inspectGitRepository(
 	}
 	rootOutput, err := exec.CommandContext(ctx, "git", rootArguments...).Output()
 	if err != nil {
-		return gitRepository{}, errors.New("current directory is not a Git repository")
+		return gitRepository{}, errNotGitRepository
 	}
 	repository := gitRepository{Root: filepath.Clean(strings.TrimSpace(string(rootOutput)))}
 	headOutput, err := gitOutput(ctx, repository.Root, "rev-parse", "HEAD")

@@ -322,7 +322,7 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	}
 	var statusJSON bytes.Buffer
 	if err := status(
-		context.Background(), client, repositoryRoot, []string{"--format", "json"},
+		context.Background(), client, repositoryRoot, []string{"--json"},
 		&statusJSON, &statusErrors,
 	); err != nil {
 		t.Fatal(err)
@@ -331,62 +331,31 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	if err := decodeTestJSON(statusJSON.Bytes(), &statusPayload); err != nil {
 		t.Fatal(err)
 	}
-	if statusPayload.ContractVersion != 1 || statusPayload.Kind != "softpractice.status" ||
+	if statusPayload.Kind != "softpractice.status" ||
 		statusPayload.Local.Head == "" || !statusPayload.Local.Clean ||
 		statusPayload.LatestSubmission == nil || statusPayload.LatestSubmission.ID != submissionID {
 		t.Fatalf("machine status = %+v", statusPayload)
 	}
 
 	var submissionJSON bytes.Buffer
-	if err := submissionCommand(
-		context.Background(), client, repositoryRoot,
-		[]string{"show", "--id", submissionID, "--format", "json"},
+	if err := resultCommand(
+		context.Background(), newLearnerUseCases(client, repositoryRoot),
+		[]string{"--id", submissionID, "--json"},
 		&submissionJSON, &statusErrors,
 	); err != nil {
 		t.Fatal(err)
 	}
-	var submissionPayload machineSubmission
+	var submissionPayload machineEvaluationResult
 	if err := decodeTestJSON(submissionJSON.Bytes(), &submissionPayload); err != nil {
 		t.Fatal(err)
 	}
-	if !submissionPayload.Terminal || submissionPayload.Evaluation == nil ||
-		submissionPayload.Evaluation.Status != "revise" ||
-		submissionPayload.Evaluation.DeterministicStatus != "passed" ||
-		submissionPayload.Evaluation.Review == nil ||
-		submissionPayload.Evaluation.Review.Verdict == nil ||
-		*submissionPayload.Evaluation.Review.Verdict != "revise" {
-		t.Fatalf("machine submission = %+v", submissionPayload)
-	}
-
-	var submissionJSONV2 bytes.Buffer
-	if err := submissionCommand(
-		context.Background(), client, repositoryRoot,
-		[]string{"show", "--id", submissionID, "--format", "json-v2"},
-		&submissionJSONV2, &statusErrors,
-	); err != nil {
-		t.Fatal(err)
-	}
-	var submissionPayloadV2 machineSubmissionV2
-	if err := decodeTestJSON(submissionJSONV2.Bytes(), &submissionPayloadV2); err != nil {
-		t.Fatal(err)
-	}
-	var evaluationV2 struct {
-		Deterministic struct {
-			Checks []struct {
-				ID string `json:"id"`
-			} `json:"checks"`
-		} `json:"deterministic"`
-		Review struct {
-			Summary  string `json:"summary"`
-			Feedback []any  `json:"feedback"`
-		} `json:"review"`
-	}
-	if submissionPayloadV2.ContractVersion != 2 || !submissionPayloadV2.Terminal ||
-		json.Unmarshal(submissionPayloadV2.Evaluation, &evaluationV2) != nil ||
-		len(evaluationV2.Deterministic.Checks) != 1 ||
-		evaluationV2.Deterministic.Checks[0].ID != "public-regression" ||
-		evaluationV2.Review.Summary != "safe feedback" || len(evaluationV2.Review.Feedback) != 1 {
-		t.Fatalf("machine submission v2 = %+v, evaluation = %+v", submissionPayloadV2, evaluationV2)
+	if submissionPayload.Outcome != evaluationReady || submissionPayload.Result == nil ||
+		submissionPayload.Result.Status != "revise" ||
+		submissionPayload.Result.Deterministic.Status != "passed" ||
+		submissionPayload.Result.Review == nil ||
+		submissionPayload.Result.Review.Verdict == nil ||
+		*submissionPayload.Result.Review.Verdict != "revise" {
+		t.Fatalf("machine result = %+v", submissionPayload)
 	}
 
 	for range 2 {
@@ -410,6 +379,79 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 		idempotencyKeys[0] == "" ||
 		idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v", idempotencyKeys)
+	}
+
+	// submit --wait --json prints only the evaluation on stdout; what is meant
+	// for a person goes to stderr.
+	var waitOutput, waitErrors bytes.Buffer
+	if err := submit(
+		context.Background(), client, repositoryRoot,
+		[]string{"--yes", "--wait", "--json"}, strings.NewReader(""), &waitOutput, &waitErrors,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var waited machineEvaluationResult
+	if err := decodeTestJSON(waitOutput.Bytes(), &waited); err != nil {
+		t.Fatalf("%v\n%s", err, waitOutput.String())
+	}
+	if waited.Outcome != evaluationReady || waited.SubmissionID != submissionID || waited.Result.Status != "revise" ||
+		!strings.Contains(waitErrors.String(), "Submission: "+submissionID) {
+		t.Fatalf("submit --wait = %+v\nstderr: %s", waited, waitErrors.String())
+	}
+
+	// Without --wait, submit --json prints the receipt as its one document.
+	var receiptOutput bytes.Buffer
+	if err := submit(
+		context.Background(), client, repositoryRoot,
+		[]string{"--yes", "--json"}, strings.NewReader(""), &receiptOutput, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	var receipt machineSubmissionReceipt
+	if err := decodeTestJSON(receiptOutput.Bytes(), &receipt); err != nil {
+		t.Fatalf("%v\n%s", err, receiptOutput.String())
+	}
+	if receipt.Kind != "softpractice.submission" || receipt.SubmissionID != submissionID {
+		t.Fatalf("submit --json = %+v", receipt)
+	}
+
+	// Declining the confirmation is not a success: nothing is sent, and
+	// stdout still carries one document that says so.
+	uploadsBefore := len(idempotencyKeys)
+	var declinedOutput bytes.Buffer
+	err = submit(
+		context.Background(), client, repositoryRoot,
+		[]string{"--json"}, strings.NewReader("n\n"), &declinedOutput, &bytes.Buffer{},
+	)
+	var declined machineError
+	if decodeErr := decodeTestJSON(declinedOutput.Bytes(), &declined); decodeErr != nil {
+		t.Fatalf("%v\n%s", decodeErr, declinedOutput.String())
+	}
+	if err == nil || declined.Error.Code != "declined" || len(idempotencyKeys) != uploadsBefore {
+		t.Fatalf("declined submit: err = %v, payload = %+v, uploads = %d", err, declined, len(idempotencyKeys))
+	}
+
+	var taskOutput bytes.Buffer
+	if err := openCurrent(
+		context.Background(), client, repositoryRoot,
+		[]string{"task", "--no-browser", "--web", "https://app.example"}, &taskOutput, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(taskOutput.String()) != "https://app.example/assignments/pa-foundation-05?version=1" {
+		t.Fatalf("open task output = %q", taskOutput.String())
+	}
+
+	// The page may also follow the flags.
+	var materialOutput bytes.Buffer
+	if err := openCurrent(
+		context.Background(), client, repositoryRoot,
+		[]string{"--no-browser", "material", "--web", "https://app.example"}, &materialOutput, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(materialOutput.String()) != "https://app.example/assignments/pa-foundation-05/material?version=1" {
+		t.Fatalf("open material output = %q", materialOutput.String())
 	}
 
 	var openOutput, openErrors bytes.Buffer
@@ -471,7 +513,7 @@ func TestSubmissionDownloadCommandSavesOwnedRevisionArchive(t *testing.T) {
 	}
 }
 
-func TestSubmissionShowFallsBackToAcceptedPredecessor(t *testing.T) {
+func TestResultFallsBackToAcceptedPredecessor(t *testing.T) {
 	workspaceID := uuid.NewString()
 	baseRevisionID := uuid.NewString()
 	acceptedSubmissionID := uuid.NewString()
@@ -535,18 +577,18 @@ func TestSubmissionShowFallsBackToAcceptedPredecessor(t *testing.T) {
 	repositoryRoot := createLinkedGitRepository(t, workspaceID)
 
 	var output, errorOutput bytes.Buffer
-	if err := submissionCommand(
-		context.Background(), client, repositoryRoot,
-		[]string{"show", "--format", "json"}, &output, &errorOutput,
+	if err := resultCommand(
+		context.Background(), newLearnerUseCases(client, repositoryRoot),
+		[]string{"--json"}, &output, &errorOutput,
 	); err != nil {
 		t.Fatal(err)
 	}
-	var payload machineSubmission
+	var payload machineEvaluationResult
 	if err := decodeTestJSON(output.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.SubmissionID != acceptedSubmissionID || payload.Evaluation == nil ||
-		payload.Evaluation.Status != "accepted" {
+	if payload.SubmissionID != acceptedSubmissionID || payload.Result == nil ||
+		payload.Result.Status != "accepted" {
 		t.Fatalf("machine submission = %+v", payload)
 	}
 	if !strings.Contains(errorOutput.String(), "pa-foundation-02 has no submission yet") ||
@@ -1649,43 +1691,7 @@ func TestUpdateRefreshesTheLessonVersionWithoutTouchingLearnerFiles(t *testing.T
 // update. `update` replaces exactly those files and nothing the learner wrote.
 func TestUpdateReplacesRefactoredAuthorFilesAndKeepsLearnerWork(t *testing.T) {
 	workspaceID := uuid.NewString()
-	payloadRoot := t.TempDir()
-	refactored := []byte("# refactored author module\n")
-	if err := os.WriteFile(filepath.Join(payloadRoot, "main.py"), refactored, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(refactored)
-	var archive bytes.Buffer
-	metadata, err := starterbundle.Build(payloadRoot, []starterbundle.File{
-		{Path: "main.py", SHA256: hex.EncodeToString(digest[:])},
-	}, &archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const ref = "pa-foundation-01-v1-to-pa-foundation-01-v2@1.0.0"
-	server := lessonBumpServer(t, workspaceID, func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v1/workspaces/" + workspaceID + "/current-assignment/lesson-version-update":
-			writeTestJSON(writer, map[string]any{
-				"ref": ref, "assignment_id": "pa-foundation-01", "from_version": 1, "to_version": 2,
-				"archive_sha256": metadata.SHA256, "archive_size": metadata.Size,
-				"files":      []any{map[string]any{"path": "main.py", "sha256": hex.EncodeToString(digest[:])}},
-				"operations": []any{map[string]any{"kind": "replace", "path": "main.py"}},
-			})
-		case "/v1/workspaces/" + workspaceID + "/current-assignment/lesson-version-update/archive":
-			if request.URL.Query().Get("from_version") != "1" {
-				http.NotFound(writer, request)
-				return
-			}
-			writer.Header().Set("Content-Type", "application/gzip")
-			writer.Header().Set("Content-Length", fmt.Sprint(metadata.Size))
-			writer.Header().Set("X-Softpractice-Course-Update-SHA256", metadata.SHA256)
-			writer.Header().Set("X-Softpractice-Course-Update-Ref", ref)
-			_, _ = writer.Write(archive.Bytes())
-		default:
-			http.NotFound(writer, request)
-		}
-	})
+	server, refactored := refactoredLessonServer(t, workspaceID)
 	defer server.Close()
 	client := savedTestClient(t, server.URL)
 	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)

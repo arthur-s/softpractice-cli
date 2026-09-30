@@ -98,7 +98,7 @@ func (s CredentialStore) Load() (Credentials, error) {
 	info, err := os.Lstat(s.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Credentials{}, errors.New("not logged in; run `softpractice login`")
+			return Credentials{}, loginRequired("not logged in; run `softpractice login`")
 		}
 		return Credentials{}, err
 	}
@@ -120,17 +120,17 @@ func (s CredentialStore) Load() (Credentials, error) {
 		metadata.APIURL == "" ||
 		metadata.RefreshIdleExpiresAt.IsZero() ||
 		metadata.RefreshAbsoluteExpiresAt.IsZero() {
-		return Credentials{}, errors.New("credentials metadata is incomplete; login again")
+		return Credentials{}, loginRequired("credentials metadata is incomplete; login again")
 	}
 	refreshToken, err := s.Secrets.Get(keyringService, s.refreshTokenAccount(metadata.APIURL))
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
-			return Credentials{}, errors.New("refresh credential is missing; run `softpractice login`")
+			return Credentials{}, loginRequired("refresh credential is missing; run `softpractice login`")
 		}
 		return Credentials{}, fmt.Errorf("read refresh credential from system keyring: %w", err)
 	}
 	if refreshToken == "" {
-		return Credentials{}, errors.New("refresh credential is empty; run `softpractice login`")
+		return Credentials{}, loginRequired("refresh credential is empty; run `softpractice login`")
 	}
 	return Credentials{
 		APIURL: metadata.APIURL, RefreshToken: refreshToken,

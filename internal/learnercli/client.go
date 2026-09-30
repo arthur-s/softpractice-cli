@@ -176,6 +176,64 @@ func (c *Client) AuthorizedJSON(
 	return c.jsonRequest(ctx, method, path, credentials.AccessToken, request, response)
 }
 
+// PollResponse is the outcome of one authorized poll. Status is 200 for a
+// ready resource and 202 while the server still works on it; RetryAfter is
+// the server's minimum wait before the next poll, zero when it named none.
+type PollResponse struct {
+	Status     int
+	RetryAfter time.Duration
+}
+
+// AuthorizedPoll performs an authorized GET for an endpoint that answers 202
+// with Retry-After while its result is pending. A non-2xx answer is an
+// *HTTPError that carries Retry-After too, so a rate limit is also waited out
+// at the interval the server asked for.
+func (c *Client) AuthorizedPoll(ctx context.Context, path string, response any) (PollResponse, error) {
+	credentials, err := c.validCredentials(ctx)
+	if err != nil {
+		return PollResponse{}, err
+	}
+	result, err := c.pollOnce(ctx, path, credentials.AccessToken, response)
+	var statusError *HTTPError
+	if !errors.As(err, &statusError) || statusError.Status != http.StatusUnauthorized {
+		return result, err
+	}
+	credentials, err = c.refresh(ctx, credentials)
+	if err != nil {
+		return PollResponse{}, err
+	}
+	return c.pollOnce(ctx, path, credentials.AccessToken, response)
+}
+
+func (c *Client) pollOnce(ctx context.Context, path, token string, response any) (PollResponse, error) {
+	status, body, headers, err := c.rawJSON(ctx, http.MethodGet, path, token, nil)
+	if err != nil {
+		return PollResponse{}, err
+	}
+	retryAfter := parseRetryAfter(headers.Get("Retry-After"))
+	if status < 200 || status >= 300 {
+		httpErr := parseHTTPError(status, body)
+		if typed, ok := httpErr.(*HTTPError); ok {
+			typed.RetryAfter = retryAfter
+		}
+		return PollResponse{}, httpErr
+	}
+	if err := decodeJSON(body, response); err != nil {
+		return PollResponse{}, err
+	}
+	return PollResponse{Status: status, RetryAfter: retryAfter}, nil
+}
+
+// parseRetryAfter accepts the delta-seconds form the API sends. An HTTP date
+// or a malformed value yields zero, and the caller falls back to its default.
+func parseRetryAfter(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds < 1 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func (c *Client) Submit(
 	ctx context.Context,
 	path string,
@@ -200,6 +258,11 @@ func (c *Client) Submit(
 }
 
 func (c *Client) SaveCredentials(credentials Credentials) error {
+	unlock, err := c.Store.lock(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if credentials.APIURL != c.BaseURL {
 		return errors.New("credentials belong to a different API URL")
 	}
@@ -211,6 +274,11 @@ func (c *Client) SaveCredentials(credentials Credentials) error {
 }
 
 func (c *Client) Logout(ctx context.Context) error {
+	unlock, err := c.Store.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	credentials, err := c.Store.Load()
 	if err != nil {
 		return err
@@ -237,38 +305,43 @@ func (c *Client) Logout(ctx context.Context) error {
 }
 
 func (c *Client) validCredentials(ctx context.Context) (Credentials, error) {
-	c.credentialsMu.Lock()
-	var credentials Credentials
-	if c.credentials != nil {
-		credentials = *c.credentials
+	return c.authorizedCredentials(ctx, "")
+}
+
+func (c *Client) refresh(ctx context.Context, rejected Credentials) (Credentials, error) {
+	return c.authorizedCredentials(ctx, rejected.AccessToken)
+}
+
+// Serialize rotation across MCP calls and CLI processes sharing this store.
+// Reload the refresh credential under the lock: another process may have
+// rotated it, signed in, or signed out since the last request.
+func (c *Client) authorizedCredentials(ctx context.Context, rejectedAccessToken string) (Credentials, error) {
+	unlock, err := c.Store.lock(ctx)
+	if err != nil {
+		return Credentials{}, err
 	}
-	c.credentialsMu.Unlock()
-	if credentials.RefreshToken == "" {
-		loaded, err := c.Store.Load()
-		if err != nil {
-			return Credentials{}, err
-		}
-		credentials = loaded
+	defer unlock()
+	credentials, err := c.Store.Load()
+	if err != nil {
+		return Credentials{}, err
 	}
 	if credentials.APIURL != c.BaseURL {
-		return Credentials{}, errors.New("stored credentials belong to a different API URL; login again")
+		return Credentials{}, loginRequired("stored credentials belong to a different API URL; login again")
 	}
-	if time.Now().Add(30 * time.Second).Before(credentials.AccessExpiresAt) {
+	c.credentialsMu.Lock()
+	if cached := c.credentials; cached != nil && cached.APIURL == credentials.APIURL &&
+		cached.RefreshToken == credentials.RefreshToken {
+		credentials = *cached
+	}
+	c.credentialsMu.Unlock()
+	if time.Now().Add(30*time.Second).Before(credentials.AccessExpiresAt) &&
+		credentials.AccessToken != rejectedAccessToken {
 		return credentials, nil
 	}
 	now := time.Now()
-	if !credentials.RefreshIdleExpiresAt.IsZero() &&
-		!now.Before(credentials.RefreshIdleExpiresAt) {
-		return Credentials{}, errors.New("CLI login expired; run `softpractice login`")
+	if !now.Before(credentials.RefreshIdleExpiresAt) || !now.Before(credentials.RefreshAbsoluteExpiresAt) {
+		return Credentials{}, loginRequired("CLI login expired; run `softpractice login`")
 	}
-	if !credentials.RefreshAbsoluteExpiresAt.IsZero() &&
-		!now.Before(credentials.RefreshAbsoluteExpiresAt) {
-		return Credentials{}, errors.New("CLI login expired; run `softpractice login`")
-	}
-	return c.refresh(ctx, credentials)
-}
-
-func (c *Client) refresh(ctx context.Context, credentials Credentials) (Credentials, error) {
 	var tokens tokenSet
 	if err := c.jsonRequest(ctx, http.MethodPost, "/v1/auth/tokens/refresh", "", map[string]string{
 		"refresh_token": credentials.RefreshToken,
@@ -387,6 +460,8 @@ type HTTPError struct {
 	Code      string
 	Message   string
 	SupportID string
+	// RetryAfter is set only by AuthorizedPoll, from the response header.
+	RetryAfter time.Duration
 }
 
 type StarterArchive struct {

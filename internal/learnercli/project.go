@@ -91,10 +91,10 @@ func LoadProjectLink(repositoryRoot string) (ProjectLink, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return ProjectLink{}, fmt.Errorf(
+			return ProjectLink{}, projectNotLinked(fmt.Sprintf(
 				"%s is missing; download the project linked to your workspace",
 				projectLinkRelativePath,
-			)
+			))
 		}
 		return ProjectLink{}, fmt.Errorf("inspect project link: %w", err)
 	}

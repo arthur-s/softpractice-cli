@@ -17,28 +17,9 @@ import (
 	"github.com/arthur-s/softpractice-cli/internal/learnercli"
 )
 
-type outputFormat string
-
-const (
-	outputFormatText outputFormat = "text"
-	outputFormatJSON outputFormat = "json"
-)
-
-func parseOutputFormat(value string) (outputFormat, error) {
-	switch outputFormat(strings.ToLower(strings.TrimSpace(value))) {
-	case outputFormatText:
-		return outputFormatText, nil
-	case outputFormatJSON:
-		return outputFormatJSON, nil
-	default:
-		return "", errors.New("format must be text or json")
-	}
-}
-
 type machineStatus struct {
-	ContractVersion int    `json:"contract_version"`
-	Kind            string `json:"kind"`
-	Account         struct {
+	Kind    string `json:"kind"`
+	Account struct {
 		ID            string `json:"id"`
 		EmailVerified bool   `json:"email_verified"`
 	} `json:"account"`
@@ -50,6 +31,7 @@ type machineStatus struct {
 	Assignment struct {
 		ID      string `json:"id"`
 		Version int    `json:"version"`
+		Title   string `json:"title"`
 		State   string `json:"state"`
 	} `json:"assignment"`
 	Local struct {
@@ -57,10 +39,136 @@ type machineStatus struct {
 		Clean bool   `json:"clean"`
 	} `json:"local"`
 	// Transition is present only while the server has already opened the next
-	// lesson and this folder still holds the previous one. It is additive: a
-	// contract_version 1 reader that ignores unknown keys is unaffected.
-	Transition       *machineTransition        `json:"transition,omitempty"`
-	LatestSubmission *machineSubmissionSummary `json:"latest_submission"`
+	// lesson and this folder still holds the previous one.
+	Transition *machineTransition `json:"transition,omitempty"`
+	// LessonVersionUpdate is present while the server publishes a newer
+	// version of the lesson this folder holds.
+	LessonVersionUpdate *machineLessonVersionUpdate `json:"lesson_version_update,omitempty"`
+	LatestSubmission    *machineSubmissionSummary   `json:"latest_submission"`
+	// NextActions lists what to do next, most important first.
+	NextActions []nextAction `json:"next_actions"`
+}
+
+// nextAction is one step the learner can take now. Command is a CLI command;
+// Tool is the `softpractice mcp` tool for it, set only in MCP output; URL is a
+// page for an action that happens on the site.
+type nextAction struct {
+	Code      string         `json:"code"`
+	Command   string         `json:"command,omitempty"`
+	Tool      string         `json:"tool,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	URL       string         `json:"url,omitempty"`
+}
+
+// nextActions derives the learner's next steps from the status, most
+// important first. The list is never empty.
+func nextActions(ctx context.Context, snapshot statusSnapshot) []nextAction {
+	link, workspace, repository := snapshot.Link, snapshot.Workspace, snapshot.Repository
+	switch workspace.Workspace.State {
+	case "active":
+	case "completed":
+		// The practicum is finished: nothing is left to submit or update.
+		return []nextAction{{Code: "practicum_completed", URL: webPracticumCompletionURL(ctx, link.ProjectID)}}
+	default:
+		return []nextAction{{Code: "workspace_inactive"}}
+	}
+	var actions []nextAction
+	submit := nextAction{Code: "submit", Command: "softpractice submit --wait"}
+	if !repository.Clean {
+		submit = nextAction{Code: "commit_changes"}
+	}
+	latest := workspace.LatestSubmission
+	switch {
+	case pendingTransition(link, workspace):
+		if !repository.Clean {
+			// update refuses a dirty tree, and committing the changes would
+			// turn the accepted tree into a continued project it does not
+			// overlay.
+			actions = append(actions, nextAction{Code: "stash_changes", Command: "git stash"})
+		}
+		actions = append(actions, nextAction{Code: "apply_update", Command: "softpractice update"})
+	case latest == nil:
+		actions = append(actions, submit)
+	case latest.JobState == "queued" || latest.JobState == "leased":
+		actions = append(actions, nextAction{Code: "wait_result", Command: "softpractice result --wait"})
+	case latest.JobState == "superseded":
+		// This evaluation will have no result, and submitting the same commit
+		// again replays this submission: only a new commit is evaluated.
+		if repository.Clean {
+			submit.Code = "resubmit"
+		}
+		actions = append(actions, submit)
+	default:
+		result := snapshot.Latest
+		readResult := nextAction{Code: "read_result", Command: "softpractice result"}
+		switch {
+		case result != nil && result.QuestionsAnswerable:
+			actions = append(actions,
+				nextAction{Code: "answer_questions", URL: webResultURL(ctx, latest.ID)}, readResult)
+		case !repository.Clean || (result != nil && result.CommitSHA != "" && result.CommitSHA != repository.CommitSHA):
+			// Work continued after this submission.
+			actions = append(actions, submit)
+		case result != nil && result.Status == "technical_failure":
+			// The same revision can be evaluated again only from the result
+			// page; submitting the same commit replays this submission.
+			actions = append(actions,
+				nextAction{Code: "retry_evaluation", URL: webResultURL(ctx, latest.ID)}, readResult)
+		default:
+			actions = append(actions, readResult)
+		}
+	}
+	if pendingLessonVersion(link, workspace) {
+		actions = append(actions, nextAction{Code: "update_lesson_version", Command: "softpractice update"})
+	}
+	return actions
+}
+
+func nextActionText(ctx context.Context, action nextAction) string {
+	switch action.Code {
+	case "practicum_completed":
+		return text(ctx, "практикум пройден: ", "the practicum is completed: ") + action.URL
+	case "workspace_inactive":
+		return text(ctx, "workspace не активен и не принимает отправки",
+			"the workspace is not active and accepts no submissions")
+	case "stash_changes":
+		return text(ctx, "уберите незакоммиченные изменения, например `git stash`: `softpractice update` применяет переход только к чистому принятому решению",
+			"set uncommitted changes aside, for example with `git stash`: `softpractice update` applies the transition only to the clean accepted solution")
+	case "apply_update":
+		return text(ctx, "примените переход к следующему уроку: `softpractice update`",
+			"apply the transition to the next lesson: `softpractice update`")
+	case "commit_changes":
+		return text(ctx, "сделайте commit изменений и отправьте решение: `softpractice submit --wait`",
+			"commit your changes and submit: `softpractice submit --wait`")
+	case "submit":
+		return text(ctx, "когда решение готово и закоммичено, отправьте его: `softpractice submit --wait`",
+			"when the solution is committed, submit it: `softpractice submit --wait`")
+	case "resubmit":
+		return text(ctx, "проверка последней отправки заменена, результата у неё не будет; сделайте новый commit и отправьте его: `softpractice submit --wait`",
+			"the evaluation of the latest submission was superseded and will have no result; make a new commit and submit it: `softpractice submit --wait`")
+	case "wait_result":
+		return text(ctx, "дождитесь результата проверки: `softpractice result --wait`",
+			"wait for the evaluation: `softpractice result --wait`")
+	case "read_result":
+		return text(ctx, "прочитайте результат проверки: `softpractice result`",
+			"read the evaluation result: `softpractice result`")
+	case "answer_questions":
+		return text(ctx, "ответьте на вопросы рецензента на странице результата: ",
+			"answer the reviewer's questions on the result page: ") + action.URL
+	case "retry_evaluation":
+		return text(ctx, "проверка не завершилась из-за технической ошибки; повторите её на странице результата: ",
+			"the evaluation failed for a technical reason; retry it on the result page: ") + action.URL
+	case "update_lesson_version":
+		return text(ctx, "можно перейти на новую версию урока: `softpractice update`",
+			"you can move to the new lesson version: `softpractice update`")
+	default:
+		return action.Code
+	}
+}
+
+type machineLessonVersionUpdate struct {
+	AssignmentID string `json:"assignment_id"`
+	FromVersion  int    `json:"from_version"`
+	ToVersion    int    `json:"to_version"`
 }
 
 type machineTransition struct {
@@ -75,16 +183,18 @@ type machineSubmissionSummary struct {
 	RevisionID  string    `json:"revision_id"`
 	JobState    string    `json:"job_state"`
 	SubmittedAt time.Time `json:"submitted_at"`
+	// EvaluationStatus is the evaluation result status (accepted, revise,
+	// ...) once the job is terminal; omitted while it is not.
+	EvaluationStatus string `json:"evaluation_status,omitempty"`
 }
 
-func writeStatusJSON(
-	output io.Writer,
-	user currentUser,
-	link learnercli.ProjectLink,
-	workspace learnercli.WorkspaceStatus,
-	repository gitRepository,
-) error {
-	payload := machineStatus{ContractVersion: 1, Kind: "softpractice.status"}
+func writeStatusJSON(ctx context.Context, output io.Writer, snapshot statusSnapshot) error {
+	return writeMachineJSON(output, buildMachineStatus(ctx, snapshot))
+}
+
+func buildMachineStatus(ctx context.Context, snapshot statusSnapshot) machineStatus {
+	user, link, workspace, repository := snapshot.User, snapshot.Link, snapshot.Workspace, snapshot.Repository
+	payload := machineStatus{Kind: "softpractice.status"}
 	payload.Account.ID = user.ID
 	payload.Account.EmailVerified = user.EmailVerified
 	payload.Workspace.ID = workspace.Workspace.ID
@@ -92,6 +202,7 @@ func writeStatusJSON(
 	payload.Workspace.State = workspace.Workspace.State
 	payload.Assignment.ID = workspace.Assignment.ID
 	payload.Assignment.Version = workspace.Assignment.Version
+	payload.Assignment.Title = workspace.Assignment.Title
 	payload.Assignment.State = workspace.Assignment.State
 	payload.Local.Head = repository.CommitSHA
 	payload.Local.Clean = repository.Clean
@@ -101,14 +212,24 @@ func writeStatusJSON(
 			ToAssignmentID: workspace.Assignment.ID, ToAssignmentVersion: workspace.Assignment.Version,
 		}
 	}
+	if pendingLessonVersion(link, workspace) {
+		payload.LessonVersionUpdate = &machineLessonVersionUpdate{
+			AssignmentID: link.AssignmentID,
+			FromVersion:  link.AssignmentVersion, ToVersion: workspace.Assignment.Version,
+		}
+	}
 	if workspace.LatestSubmission != nil {
 		payload.LatestSubmission = &machineSubmissionSummary{
 			ID: workspace.LatestSubmission.ID, RevisionID: workspace.LatestSubmission.RevisionID,
 			JobState:    workspace.LatestSubmission.JobState,
 			SubmittedAt: workspace.LatestSubmission.SubmittedAt,
 		}
+		if snapshot.Latest != nil {
+			payload.LatestSubmission.EvaluationStatus = snapshot.Latest.Status
+		}
 	}
-	return writeMachineJSON(output, payload)
+	payload.NextActions = nextActions(ctx, snapshot)
+	return payload
 }
 
 type evaluationAPIResponse struct {
@@ -122,40 +243,12 @@ type evaluationAPIResponse struct {
 	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
+// evaluationProjection is the part of a terminal evaluation that
+// normalizeSubmissionResponse validates; `result` renders the rest.
 type evaluationProjection struct {
 	SchemaVersion int    `json:"schema_version"`
 	ExerciseID    string `json:"exercise_id"`
 	Status        string `json:"status"`
-	Deterministic *struct {
-		Status string `json:"status"`
-	} `json:"deterministic"`
-	Review *struct {
-		Status        string  `json:"status"`
-		Mode          string  `json:"mode"`
-		Authoritative bool    `json:"authoritative"`
-		Verdict       *string `json:"verdict"`
-	} `json:"review"`
-	TechnicalError *struct {
-		ErrorCode string `json:"error_code"`
-		Stage     string `json:"stage"`
-		SupportID string `json:"support_id"`
-	} `json:"technical_error"`
-}
-
-type machineEvaluation struct {
-	SchemaVersion       int                    `json:"schema_version"`
-	ExerciseID          string                 `json:"exercise_id"`
-	Status              string                 `json:"status"`
-	DeterministicStatus string                 `json:"deterministic_status,omitempty"`
-	Review              *machineReview         `json:"review,omitempty"`
-	TechnicalError      *machineTechnicalError `json:"technical_error,omitempty"`
-}
-
-type machineReview struct {
-	Status        string  `json:"status"`
-	Mode          string  `json:"mode"`
-	Authoritative bool    `json:"authoritative"`
-	Verdict       *string `json:"verdict"`
 }
 
 type machineTechnicalError struct {
@@ -165,144 +258,14 @@ type machineTechnicalError struct {
 }
 
 type machineSubmission struct {
-	ContractVersion int                `json:"contract_version"`
-	Kind            string             `json:"kind"`
-	SubmissionID    string             `json:"submission_id"`
-	EvaluationJobID string             `json:"evaluation_job_id"`
-	JobState        string             `json:"job_state"`
-	Terminal        bool               `json:"terminal"`
-	Attempt         int                `json:"attempt"`
-	MaxAttempts     int                `json:"max_attempts"`
-	NextPollSeconds int                `json:"next_poll_seconds,omitempty"`
-	UpdatedAt       time.Time          `json:"updated_at"`
-	ResultPath      string             `json:"result_path"`
-	Evaluation      *machineEvaluation `json:"evaluation,omitempty"`
-}
-
-// machineSubmissionV2 preserves the entire learner-safe evaluation projection
-// returned by the public API. Version 1 intentionally exposes a compact
-// summary; v2 is for automation that must assert individual safe checks and
-// review fields without parsing human-oriented CLI output.
-type machineSubmissionV2 struct {
-	ContractVersion int             `json:"contract_version"`
-	Kind            string          `json:"kind"`
-	SubmissionID    string          `json:"submission_id"`
-	EvaluationJobID string          `json:"evaluation_job_id"`
-	JobState        string          `json:"job_state"`
-	Terminal        bool            `json:"terminal"`
-	Attempt         int             `json:"attempt"`
-	MaxAttempts     int             `json:"max_attempts"`
-	NextPollSeconds int             `json:"next_poll_seconds,omitempty"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	ResultPath      string          `json:"result_path"`
-	Evaluation      json.RawMessage `json:"evaluation,omitempty"`
-}
-
-func submissionCommand(
-	ctx context.Context,
-	client *learnercli.Client,
-	startDirectory string,
-	args []string,
-	output, errorOutput io.Writer,
-) error {
-	if len(args) == 0 {
-		return errors.New("usage: softpractice submission show|download ...")
-	}
-	switch args[0] {
-	case "show":
-		return showSubmission(ctx, client, startDirectory, args[1:], output, errorOutput)
-	case "download":
-		return downloadSubmissionRevision(ctx, client, args[1:], output, errorOutput)
-	default:
-		return errors.New("usage: softpractice submission show|download ...")
-	}
-}
-
-func showSubmission(
-	ctx context.Context,
-	client *learnercli.Client,
-	startDirectory string,
-	args []string,
-	output, errorOutput io.Writer,
-) error {
-	flags := flag.NewFlagSet("submission show", flag.ContinueOnError)
-	flags.SetOutput(errorOutput)
-	id := flags.String("id", "", "submission ID; defaults to the latest linked submission")
-	format := flags.String("format", "text", "output format: text, json, or json-v2")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("usage: softpractice submission show [--id ID] [--format text|json|json-v2]")
-	}
-	formatValue := strings.ToLower(strings.TrimSpace(*format))
-	outputFormat := outputFormatText
-	jsonV2 := formatValue == "json-v2"
-	if !jsonV2 {
-		var err error
-		outputFormat, err = parseOutputFormat(formatValue)
-		if err != nil {
-			return errors.New("format must be text, json, or json-v2")
-		}
-	}
-	submissionID := strings.TrimSpace(*id)
-	if submissionID == "" {
-		_, link, workspace, linkErr := linkedWorkspace(ctx, client, startDirectory, false)
-		if linkErr != nil {
-			return linkErr
-		}
-		if workspace.LatestSubmission != nil {
-			submissionID = workspace.LatestSubmission.ID
-		} else {
-			// An accepted submission advances the workspace, so right after
-			// acceptance the newest submission belongs to the previous lesson.
-			assignmentID, latestID, found, err := client.LatestPracticumSubmission(ctx, link.ProjectID)
-			if err != nil {
-				return err
-			}
-			if !found {
-				return errors.New("the linked workspace has no submission")
-			}
-			fmt.Fprintf(errorOutput, text(ctx,
-				"По %s отправок ещё нет; показан принятый результат %s.\n",
-				"%s has no submission yet; showing the accepted %s result.\n",
-			), workspace.Assignment.ID, assignmentID)
-			submissionID = latestID
-		}
-	}
-	parsedID, err := uuid.Parse(submissionID)
-	if err != nil || parsedID.String() != submissionID {
-		return errors.New("submission ID must be a canonical UUID")
-	}
-	var response evaluationAPIResponse
-	if err := client.AuthorizedJSON(
-		ctx, "GET", "/v1/submissions/"+submissionID+"/evaluation", nil, &response,
-	); err != nil {
-		return err
-	}
-	payload, err := normalizeSubmissionResponse(response)
-	if err != nil {
-		return err
-	}
-	if payload.SubmissionID != submissionID {
-		return errors.New("evaluation response does not match the requested submission")
-	}
-	if jsonV2 {
-		return writeMachineJSON(output, normalizeSubmissionResponseV2(payload, response.Evaluation))
-	}
-	if outputFormat == outputFormatJSON {
-		return writeMachineJSON(output, payload)
-	}
-	fmt.Fprintf(
-		output,
-		text(ctx, "Отправка: %s\nСостояние проверки: %s\n", "Submission: %s\nEvaluation state: %s\n"),
-		payload.SubmissionID,
-		payload.JobState,
-	)
-	if payload.Evaluation != nil {
-		fmt.Fprintf(output, text(ctx, "Результат: %s\n", "Result: %s\n"), payload.Evaluation.Status)
-	}
-	return nil
+	SubmissionID    string    `json:"submission_id"`
+	EvaluationJobID string    `json:"evaluation_job_id"`
+	JobState        string    `json:"job_state"`
+	Terminal        bool      `json:"terminal"`
+	Attempt         int       `json:"attempt"`
+	MaxAttempts     int       `json:"max_attempts"`
+	NextPollSeconds int       `json:"next_poll_seconds,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func downloadSubmissionRevision(
@@ -311,28 +274,27 @@ func downloadSubmissionRevision(
 	args []string,
 	output, errorOutput io.Writer,
 ) error {
-	flags := flag.NewFlagSet("submission download", flag.ContinueOnError)
+	flags := flag.NewFlagSet("submissions download", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	id := flags.String("id", "", "accepted submission ID from the result page")
 	destination := flags.String("output", "", "destination ZIP path")
-	if err := flags.Parse(args); err != nil {
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || strings.TrimSpace(*id) == "" {
-		return errors.New(text(ctx,
-			"использование: softpractice submission download --id ID [--output PATH]",
-			"usage: softpractice submission download --id ID [--output PATH]"))
+		return usage(ctx,
+			"использование: softpractice submissions download --id ID [--output PATH]",
+			"usage: softpractice submissions download --id ID [--output PATH]")
 	}
 	submissionID := strings.TrimSpace(*id)
-	parsedID, err := uuid.Parse(submissionID)
-	if err != nil || parsedID.String() != submissionID {
-		return errors.New(text(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID"))
+	if validateSubmissionID(submissionID) != nil {
+		return usage(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID")
 	}
 	target := strings.TrimSpace(*destination)
 	if target == "" {
 		target = "softpractice-" + submissionID + ".zip"
 	}
-	target, err = filepath.Abs(target)
+	target, err := filepath.Abs(target)
 	if err != nil {
 		return err
 	}
@@ -374,11 +336,9 @@ func normalizeSubmissionResponse(response evaluationAPIResponse) (machineSubmiss
 		return machineSubmission{}, errors.New("evaluation response is incomplete")
 	}
 	payload := machineSubmission{
-		ContractVersion: 1, Kind: "softpractice.submission",
 		SubmissionID: response.SubmissionID, EvaluationJobID: response.EvaluationJobID,
 		JobState: response.JobState, Attempt: response.Attempt, MaxAttempts: response.MaxAttempts,
 		NextPollSeconds: response.NextPollSeconds, UpdatedAt: response.UpdatedAt,
-		ResultPath: "/submissions/" + response.SubmissionID + "/result",
 	}
 	switch response.JobState {
 	case "queued", "leased":
@@ -416,57 +376,5 @@ func normalizeSubmissionResponse(response evaluationAPIResponse) (machineSubmiss
 		(response.JobState == "failed") != (evaluation.Status == "technical_failure") {
 		return machineSubmission{}, errors.New("evaluation projection status is inconsistent")
 	}
-	machine := machineEvaluation{
-		SchemaVersion: evaluation.SchemaVersion,
-		ExerciseID:    evaluation.ExerciseID,
-		Status:        evaluation.Status,
-	}
-	if evaluation.Deterministic != nil {
-		machine.DeterministicStatus = evaluation.Deterministic.Status
-	}
-	if evaluation.Review != nil {
-		machine.Review = &machineReview{
-			Status: evaluation.Review.Status, Mode: evaluation.Review.Mode,
-			Authoritative: evaluation.Review.Authoritative, Verdict: evaluation.Review.Verdict,
-		}
-	}
-	if evaluation.TechnicalError != nil {
-		machine.TechnicalError = &machineTechnicalError{
-			ErrorCode: evaluation.TechnicalError.ErrorCode,
-			Stage:     evaluation.TechnicalError.Stage,
-			SupportID: evaluation.TechnicalError.SupportID,
-		}
-	}
-	payload.Evaluation = &machine
 	return payload, nil
-}
-
-func normalizeSubmissionResponseV2(
-	payload machineSubmission,
-	evaluation json.RawMessage,
-) machineSubmissionV2 {
-	result := machineSubmissionV2{
-		ContractVersion: 2,
-		Kind:            payload.Kind,
-		SubmissionID:    payload.SubmissionID,
-		EvaluationJobID: payload.EvaluationJobID,
-		JobState:        payload.JobState,
-		Terminal:        payload.Terminal,
-		Attempt:         payload.Attempt,
-		MaxAttempts:     payload.MaxAttempts,
-		NextPollSeconds: payload.NextPollSeconds,
-		UpdatedAt:       payload.UpdatedAt,
-		ResultPath:      payload.ResultPath,
-	}
-	if payload.Terminal {
-		result.Evaluation = append(json.RawMessage(nil), evaluation...)
-	}
-	return result
-}
-
-func writeMachineJSON(output io.Writer, payload any) error {
-	encoder := json.NewEncoder(output)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(payload)
 }

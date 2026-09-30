@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/arthur-s/softpractice-cli/internal/learnercli"
-	"github.com/arthur-s/softpractice-cli/internal/localchecks"
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
+
+	"github.com/arthur-s/softpractice-cli/internal/learnercli"
+	"github.com/arthur-s/softpractice-cli/internal/localchecks"
 )
 
 const autoChecksKey = "softpractice.autoChecks"
@@ -46,7 +48,7 @@ func setProjectAutoChecks(ctx context.Context, value string, output io.Writer) e
 
 func checkProject(ctx context.Context, startDirectory string, args []string, output, errorOutput io.Writer) error {
 	if len(args) != 0 {
-		return errors.New(text(ctx, "использование: softpractice check", "usage: softpractice check"))
+		return usage(ctx, "использование: softpractice check", "usage: softpractice check")
 	}
 	repository, err := inspectGitRepository(ctx, startDirectory, false)
 	if err != nil {
@@ -98,3 +100,48 @@ func runSubmissionChecks(ctx context.Context, repository gitRepository, output, 
 	fmt.Fprintln(output, text(ctx, "Все локальные публичные проверки прошли.", "All local public checks passed."))
 	return nil
 }
+
+// errChecksNotPublished means the folder's public checks configuration is not
+// the one the server publishes for its lesson: it was edited, or the folder
+// holds another lesson version. Running it would run commands nobody but the
+// folder vouches for.
+var errChecksNotPublished = errors.New("local checks configuration differs from the one published for this lesson")
+
+// CheckPublished runs the public checks on the working tree of the linked
+// folder, like `softpractice check`, but only when .softpractice/checks.json
+// is exactly the configuration the server publishes for the folder's lesson.
+// Callers that cannot see what a check runs, such as an MCP client, use it.
+func (u learnerUseCases) CheckPublished(ctx context.Context, output, errorOutput io.Writer) error {
+	repository, link, workspace, err := linkedWorkspace(ctx, u.client, u.startDirectory, false)
+	if err != nil {
+		return err
+	}
+	checks, err := localchecks.Load(repository.Root)
+	if err != nil {
+		return err
+	}
+	published, err := localchecks.Parse(workspace.Assignment.LocalChecks)
+	if err != nil || pendingTransition(link, workspace) || pendingLessonVersion(link, workspace) ||
+		!reflect.DeepEqual(checks, published) {
+		return fmt.Errorf("%w: %s", errChecksNotPublished, text(ctx,
+			"запустите `softpractice check` в терминале, посмотрев, какие команды он выполнит, или примените обновление урока",
+			"run `softpractice check` in a terminal after reviewing the commands it runs, or apply the lesson update"))
+	}
+	fmt.Fprintln(output, text(ctx,
+		"Локальные публичные проверки рабочего дерева:",
+		"Local public checks for the working tree:"))
+	if err := localchecks.Run(ctx, repository.Root, checks, output, errorOutput); err != nil {
+		return checkFailedError{err}
+	}
+	fmt.Fprintln(output, text(ctx,
+		"Все локальные публичные проверки прошли.",
+		"All local public checks passed."))
+	return nil
+}
+
+// checkFailedError is a check that ran and did not pass, as opposed to checks
+// that could not be run at all.
+type checkFailedError struct{ err error }
+
+func (e checkFailedError) Error() string { return e.err.Error() }
+func (e checkFailedError) Unwrap() error { return e.err }
