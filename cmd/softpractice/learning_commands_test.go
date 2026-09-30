@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -142,7 +143,7 @@ func runEvaluation(t *testing.T, useCases learnerUseCases, args ...string) (stri
 	ctx := withSettings(context.Background(), runtimeSettings{
 		Language: languageEnglish, WebURL: "https://softpractice.example",
 	})
-	err := evaluationCommand(ctx, useCases, args, &output, &errorOutput)
+	err := resultCommand(ctx, useCases, args, &output, &errorOutput)
 	return output.String(), errorOutput.String(), err
 }
 
@@ -152,7 +153,7 @@ func TestEvaluationWaitHonoursRetryAfterAndHidesDirections(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(0, 0)}
 	useCases := clock.useCases(savedTestClient(t, server.URL), "")
 
-	output, _, err := runEvaluation(t, useCases, "--id", currentSubmissionID, "--wait", "--timeout", "1m", "--format", "json")
+	output, _, err := runEvaluation(t, useCases, "--id", currentSubmissionID, "--wait", "--timeout", "1m", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +188,7 @@ func TestEvaluationWaitHonoursRetryAfterAndHidesDirections(t *testing.T) {
 		"# Revision needed", "## Automated checks: passed", "## Review", "REVIEW-SUMMARY-TEXT",
 		"- **responsibilities**: needs work. RUBRIC-RATIONALE-TEXT Where: app.py",
 		"1. **FINDING-TITLE-TEXT** (high priority)", "   - Risk: RISK-TEXT",
-		"Reviewer questions about the solution: 1.", "softpractice evaluation --directions",
+		"The reviewer's self-check questions (1) are on the result page.", "softpractice result --directions",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("text output lacks %q:\n%s", want, text)
@@ -225,7 +226,11 @@ func TestEvaluationDirectionsOnRequest(t *testing.T) {
 	server, _ := evaluationServer(t, currentSubmissionID, respondRevise)
 	useCases := newLearnerUseCases(savedTestClient(t, server.URL), "")
 	for _, format := range []string{"json", "text"} {
-		output, _, err := runEvaluation(t, useCases, "--id", currentSubmissionID, "--directions", "--format", format)
+		args := []string{"--id", currentSubmissionID, "--directions"}
+		if format == "json" {
+			args = append(args, "--json")
+		}
+		output, _, err := runEvaluation(t, useCases, args...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -242,7 +247,7 @@ func TestEvaluationTimeoutReportsNotReady(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(0, 0)}
 	useCases := clock.useCases(savedTestClient(t, server.URL), "")
 
-	output, _, err := runEvaluation(t, useCases, "--id", currentSubmissionID, "--wait", "--timeout", "45s", "--format", "json")
+	output, _, err := runEvaluation(t, useCases, "--id", currentSubmissionID, "--wait", "--timeout", "45s", "--json")
 	if !errors.Is(err, exitNotReady) {
 		t.Fatalf("err = %v, want exit status 3", err)
 	}
@@ -290,7 +295,7 @@ func TestEvaluationSupersededIsASeparateOutcome(t *testing.T) {
 	})
 	clock := &fakeClock{now: time.Unix(0, 0)}
 	output, _, err := runEvaluation(t, clock.useCases(savedTestClient(t, server.URL), ""),
-		"--id", currentSubmissionID, "--wait", "--format", "json")
+		"--id", currentSubmissionID, "--wait", "--json")
 	if !errors.Is(err, exitSuperseded) {
 		t.Fatalf("err = %v, want exit status 4", err)
 	}
@@ -309,7 +314,7 @@ func TestEvaluationUnauthorizedAsksForLogin(t *testing.T) {
 	}))
 	defer server.Close()
 	output, _, err := runEvaluation(t, newLearnerUseCases(savedTestClient(t, server.URL), ""),
-		"--id", currentSubmissionID, "--format", "json")
+		"--id", currentSubmissionID, "--json")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -333,7 +338,7 @@ func TestEvaluationUnauthorizedAsksForLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, _, err = runEvaluation(t, newLearnerUseCases(client, ""), "--id", currentSubmissionID, "--format", "json")
+	output, _, err = runEvaluation(t, newLearnerUseCases(client, ""), "--id", currentSubmissionID, "--json")
 	if !errors.Is(err, learnercli.ErrLoginRequired) || !strings.Contains(output, `"code": "login_required"`) {
 		t.Fatalf("err = %v, output:\n%s", err, output)
 	}
@@ -363,15 +368,19 @@ func TestAgentCommandsWithoutLinkedProject(t *testing.T) {
 		{directory: unlinked, code: "project_not_linked"},
 		{directory: t.TempDir(), code: "not_git_repository"},
 	} {
-		output, _, err := runEvaluation(t, newLearnerUseCases(client, tc.directory), "--format", "json")
+		output, _, err := runEvaluation(t, newLearnerUseCases(client, tc.directory), "--json")
 		if err == nil || !strings.Contains(output, `"code": "`+tc.code+`"`) {
 			t.Fatalf("%s: err = %v, output:\n%s", tc.code, err, output)
 		}
-		var assignmentOutput, errorOutput bytes.Buffer
-		err = assignmentCommand(context.Background(), newLearnerUseCases(client, tc.directory),
-			[]string{"show", "--format", "json"}, &assignmentOutput, &errorOutput)
-		if err == nil || !strings.Contains(assignmentOutput.String(), `"code": "`+tc.code+`"`) {
-			t.Fatalf("assignment %s: err = %v, output:\n%s", tc.code, err, assignmentOutput.String())
+		for name, command := range map[string]func(context.Context, learnerUseCases, []string, io.Writer, io.Writer) error{
+			"task": taskCommand, "material": materialCommand, "hint": hintCommand, "submissions": submissionsCommand,
+		} {
+			var commandOutput, errorOutput bytes.Buffer
+			err = command(context.Background(), newLearnerUseCases(client, tc.directory),
+				[]string{"--json"}, &commandOutput, &errorOutput)
+			if err == nil || !strings.Contains(commandOutput.String(), `"code": "`+tc.code+`"`) {
+				t.Fatalf("%s %s: err = %v, output:\n%s", name, tc.code, err, commandOutput.String())
+			}
 		}
 	}
 }
@@ -412,6 +421,19 @@ func assignmentServer(t *testing.T, workspaceID string, withMaterial bool) *http
 					map[string]any{"title": "A", "text": "a"}, map[string]any{"title": "B", "text": "b"},
 				}},
 			})
+		case request.URL.Path == "/v1/assignments/pa-foundation-01/prepared-hints" && request.URL.Query().Get("version") == "1":
+			writeTestJSON(writer, map[string]any{
+				"status":   "available",
+				"revealed": []any{map[string]any{"id": "rule-first", "order": 1, "markdown": "HINT-ONE-TEXT"}},
+			})
+		case request.URL.Path == "/v1/assignments/pa-foundation-00/material" && request.URL.RawQuery == "":
+			writeTestJSON(writer, map[string]any{
+				"id": "pa-theory-intro", "title": "Intro", "estimated_minutes": 5,
+				"markdown": "EARLIER-MATERIAL-TEXT",
+				"diagram": map[string]any{"title": "Map", "text_alternative": "X then Y.", "nodes": []any{
+					map[string]any{"title": "X", "text": "x"}, map[string]any{"title": "Y", "text": "y"},
+				}},
+			})
 		default:
 			t.Errorf("unexpected API request %s?%s", request.URL.Path, request.URL.RawQuery)
 			http.NotFound(writer, request)
@@ -421,32 +443,100 @@ func assignmentServer(t *testing.T, workspaceID string, withMaterial bool) *http
 	return server
 }
 
-func TestAssignmentShowReadsTheFolderLessonVersion(t *testing.T) {
+func runLessonCommand(
+	t *testing.T,
+	command func(context.Context, learnerUseCases, []string, io.Writer, io.Writer) error,
+	useCases learnerUseCases,
+	args ...string,
+) string {
+	t.Helper()
+	var output, errorOutput bytes.Buffer
+	ctx := withSettings(context.Background(), runtimeSettings{
+		Language: languageEnglish, WebURL: "https://softpractice.example",
+	})
+	if err := command(ctx, useCases, args, &output, &errorOutput); err != nil {
+		t.Fatalf("%v\n%s", err, errorOutput.String())
+	}
+	return output.String()
+}
+
+func TestTaskAndMaterialReadTheFolderLessonVersion(t *testing.T) {
 	workspaceID := uuid.NewString()
 	// The folder is pinned to v1 while the server has published v2: the
 	// requirement the tree is being written for is v1.
 	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
 	for _, withMaterial := range []bool{true, false} {
-		server := assignmentServer(t, workspaceID, withMaterial)
-		var output, errorOutput bytes.Buffer
-		if err := assignmentCommand(context.Background(), newLearnerUseCases(savedTestClient(t, server.URL), root),
-			[]string{"show", "--format", "json"}, &output, &errorOutput); err != nil {
+		useCases := newLearnerUseCases(savedTestClient(t, assignmentServer(t, workspaceID, withMaterial).URL), root)
+		var task machineTask
+		if err := decodeTestJSON([]byte(runLessonCommand(t, taskCommand, useCases, "--json")), &task); err != nil {
 			t.Fatal(err)
 		}
-		var payload machineAssignment
-		if err := decodeTestJSON(output.Bytes(), &payload); err != nil {
+		if task.Kind != "softpractice.task" || task.Assignment.Version != 1 ||
+			task.Assignment.InstructionsMarkdown != "Extract the price rule." ||
+			task.URL != "https://softpractice.example/assignments/pa-foundation-01?version=1" ||
+			task.LessonVersionUpdate == nil || task.LessonVersionUpdate.ToVersion != 2 {
+			t.Fatalf("unexpected task: %+v", task)
+		}
+		output := runLessonCommand(t, materialCommand, useCases, "--json")
+		var material machineMaterial
+		if err := decodeTestJSON([]byte(output), &material); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Kind != "softpractice.assignment" || payload.Assignment.Version != 1 ||
-			payload.Assignment.InstructionsMarkdown != "Extract the price rule." ||
-			payload.LessonVersionUpdate == nil || payload.LessonVersionUpdate.ToVersion != 2 {
-			t.Fatalf("unexpected payload: %+v", payload)
+		if withMaterial != (material.Material != nil) || material.Version != 1 ||
+			material.URL != "https://softpractice.example/assignments/pa-foundation-01/material?version=1" {
+			t.Fatalf("material = %+v, want present=%t", material, withMaterial)
 		}
-		if withMaterial != (payload.Material != nil) {
-			t.Fatalf("material = %+v, want present=%t", payload.Material, withMaterial)
+		if !withMaterial && !strings.Contains(output, `"material": null`) {
+			t.Fatalf("absent material must be null:\n%s", output)
 		}
-		if !withMaterial && !strings.Contains(output.String(), `"material": null`) {
-			t.Fatalf("absent material must be null:\n%s", output.String())
+		text := runLessonCommand(t, materialCommand, useCases)
+		if withMaterial && (!strings.Contains(text, "# Rules") || !strings.Contains(text, "- **A**: a")) {
+			t.Fatalf("unexpected material text:\n%s", text)
+		}
+		if !withMaterial && !strings.Contains(text, "has no theory material") {
+			t.Fatalf("unexpected material text:\n%s", text)
+		}
+	}
+}
+
+func TestMaterialOfAnEarlierLesson(t *testing.T) {
+	workspaceID := uuid.NewString()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	useCases := newLearnerUseCases(savedTestClient(t, assignmentServer(t, workspaceID, true).URL), root)
+	output := runLessonCommand(t, materialCommand, useCases, "--lesson", "pa-foundation-00")
+	if !strings.Contains(output, "EARLIER-MATERIAL-TEXT") ||
+		!strings.Contains(output, "https://softpractice.example/assignments/pa-foundation-00/material\n") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+}
+
+func TestHintListsOpenedHintsAndLinksToTheSite(t *testing.T) {
+	workspaceID := uuid.NewString()
+	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+	useCases := newLearnerUseCases(savedTestClient(t, assignmentServer(t, workspaceID, true).URL), root)
+	output := runLessonCommand(t, hintCommand, useCases)
+	if !strings.Contains(output, "## Hint 1\n\nHINT-ONE-TEXT") ||
+		!strings.Contains(output, "open the next hint on the assignment page: https://softpractice.example/assignments/pa-foundation-01?version=1") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+	var hints machineHints
+	if err := decodeTestJSON([]byte(runLessonCommand(t, hintCommand, useCases, "--json")), &hints); err != nil {
+		t.Fatal(err)
+	}
+	if hints.Status != "available" || len(hints.Revealed) != 1 || hints.Version != 1 {
+		t.Fatalf("unexpected hints: %+v", hints)
+	}
+}
+
+func TestInvalidArgumentsAreUsageErrors(t *testing.T) {
+	useCases := newLearnerUseCases(savedTestClient(t, "http://127.0.0.1:1"), t.TempDir())
+	for name, args := range map[string][]string{
+		"unknown flag": {"--no-such-flag"}, "extra argument": {"extra"}, "negative timeout": {"--timeout", "-1s"},
+	} {
+		_, _, err := runEvaluation(t, useCases, args...)
+		var usageErr usageError
+		if !errors.As(err, &usageErr) {
+			t.Fatalf("%s: err = %v, want a usage error", name, err)
 		}
 	}
 }
@@ -493,7 +583,7 @@ func TestAgentJSONContractsAreStable(t *testing.T) {
 	server, _ := evaluationServer(t, currentSubmissionID, respondRevise)
 	clock := &fakeClock{now: time.Unix(0, 0)}
 	output, _, err := runEvaluation(t, clock.useCases(savedTestClient(t, server.URL), ""),
-		"--id", currentSubmissionID, "--format", "json")
+		"--id", currentSubmissionID, "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +601,7 @@ func TestAgentJSONContractsAreStable(t *testing.T) {
 		"result.review.findings", "result.review.findings[].evidence_refs",
 		"result.review.findings[].observation", "result.review.findings[].priority",
 		"result.review.findings[].risk", "result.review.findings[].title", "result.review.mode",
-		"result.review.questions_count", "result.review.rubric", "result.review.rubric[].criterion",
+		"result.review.questions_answerable", "result.review.questions_count", "result.review.rubric", "result.review.rubric[].criterion",
 		"result.review.rubric[].evidence_refs", "result.review.rubric[].level",
 		"result.review.rubric[].rationale", "result.review.status", "result.review.summary",
 		"result.review.uncertainty", "result.review.uncertainty.blocking",
@@ -538,25 +628,35 @@ func TestAgentJSONContractsAreStable(t *testing.T) {
 
 	workspaceID := uuid.NewString()
 	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
-	var assignmentOutput bytes.Buffer
-	if err := assignmentCommand(context.Background(),
-		newLearnerUseCases(savedTestClient(t, assignmentServer(t, workspaceID, true).URL), root),
-		[]string{"show", "--format", "json"}, &assignmentOutput, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	wantAssignment := []string{
-		"assignment", "assignment.content_sha256", "assignment.estimated_minutes",
-		"assignment.exercise_id", "assignment.id", "assignment.instructions_markdown",
-		"assignment.kind", "assignment.project_setup", "assignment.title", "assignment.version",
-		"kind", "lesson_version_update", "lesson_version_update.assignment_id",
-		"lesson_version_update.from_version", "lesson_version_update.to_version", "material",
-		"material.diagram", "material.diagram.nodes", "material.diagram.nodes[].text",
-		"material.diagram.nodes[].title", "material.diagram.text_alternative", "material.diagram.title",
-		"material.estimated_minutes", "material.id", "material.markdown", "material.title",
-		"project_id", "workspace_id",
-	}
-	if got := jsonKeyPaths(t, assignmentOutput.Bytes()); !reflect.DeepEqual(got, wantAssignment) {
-		t.Fatalf("softpractice.assignment keys changed:\ngot  %q\nwant %q", got, wantAssignment)
+	useCases := newLearnerUseCases(savedTestClient(t, assignmentServer(t, workspaceID, true).URL), root)
+	for _, tc := range []struct {
+		kind    string
+		command func(context.Context, learnerUseCases, []string, io.Writer, io.Writer) error
+		want    []string
+	}{
+		{kind: "softpractice.task", command: taskCommand, want: []string{
+			"assignment", "assignment.content_sha256", "assignment.estimated_minutes",
+			"assignment.exercise_id", "assignment.id", "assignment.instructions_markdown",
+			"assignment.kind", "assignment.project_setup", "assignment.title", "assignment.version",
+			"kind", "lesson_version_update", "lesson_version_update.assignment_id",
+			"lesson_version_update.from_version", "lesson_version_update.to_version",
+			"project_id", "url", "workspace_id",
+		}},
+		{kind: "softpractice.material", command: materialCommand, want: []string{
+			"assignment_id", "kind", "material",
+			"material.diagram", "material.diagram.nodes", "material.diagram.nodes[].text",
+			"material.diagram.nodes[].title", "material.diagram.text_alternative", "material.diagram.title",
+			"material.estimated_minutes", "material.id", "material.markdown", "material.title",
+			"url", "version",
+		}},
+		{kind: "softpractice.hints", command: hintCommand, want: []string{
+			"assignment_id", "kind", "revealed", "revealed[].id", "revealed[].markdown", "revealed[].order",
+			"status", "url", "version",
+		}},
+	} {
+		if got := jsonKeyPaths(t, []byte(runLessonCommand(t, tc.command, useCases, "--json"))); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s keys changed:\ngot  %q\nwant %q", tc.kind, got, tc.want)
+		}
 	}
 }
 
@@ -595,7 +695,7 @@ func TestStatusJSONReportsTitleAndLatestEvaluationStatus(t *testing.T) {
 	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-05", 1)
 	var output, errorOutput bytes.Buffer
 	if err := status(context.Background(), savedTestClient(t, server.URL), root,
-		[]string{"--format", "json"}, &output, &errorOutput); err != nil {
+		[]string{"--json"}, &output, &errorOutput); err != nil {
 		t.Fatal(err)
 	}
 	var payload machineStatus
@@ -604,7 +704,98 @@ func TestStatusJSONReportsTitleAndLatestEvaluationStatus(t *testing.T) {
 	}
 	if payload.Assignment.Title != "Module boundaries" || payload.LatestSubmission == nil ||
 		payload.LatestSubmission.EvaluationStatus != "revise" || payload.Transition != nil ||
+		len(payload.NextActions) != 1 || payload.NextActions[0].Command != "softpractice result" ||
 		payload.LessonVersionUpdate != nil {
 		t.Fatalf("unexpected status: %+v", payload)
+	}
+}
+
+func TestNextActions(t *testing.T) {
+	ctx := withSettings(context.Background(), runtimeSettings{WebURL: "https://softpractice.example"})
+	submission := func(jobState string) *struct {
+		ID          string    `json:"id"`
+		RevisionID  string    `json:"revision_id"`
+		JobState    string    `json:"job_state"`
+		SubmittedAt time.Time `json:"submitted_at"`
+	} {
+		return &struct {
+			ID          string    `json:"id"`
+			RevisionID  string    `json:"revision_id"`
+			JobState    string    `json:"job_state"`
+			SubmittedAt time.Time `json:"submitted_at"`
+		}{ID: currentSubmissionID, JobState: jobState}
+	}
+	snapshot := func(pinned string, pinnedVersion int, clean bool, head string) statusSnapshot {
+		var result statusSnapshot
+		result.Link = learnercli.ProjectLink{SchemaVersion: 2, AssignmentID: pinned, AssignmentVersion: pinnedVersion}
+		result.Workspace.Assignment.ID = "pa-foundation-02"
+		result.Workspace.Assignment.Version = 2
+		result.Repository = gitRepository{Clean: clean, CommitSHA: head}
+		return result
+	}
+	codes := func(actions []nextAction) string {
+		parts := make([]string, 0, len(actions))
+		for _, action := range actions {
+			parts = append(parts, action.Code)
+		}
+		return strings.Join(parts, ",")
+	}
+
+	transition := snapshot("pa-foundation-01", 1, true, "abc")
+	fresh := snapshot("pa-foundation-02", 2, true, "abc")
+	dirty := snapshot("pa-foundation-02", 2, false, "abc")
+	queued := snapshot("pa-foundation-02", 2, true, "abc")
+	queued.Workspace.LatestSubmission = submission("leased")
+	questions := snapshot("pa-foundation-02", 2, true, "abc")
+	questions.Workspace.LatestSubmission = submission("completed")
+	questions.Latest = &latestResult{Status: "uncertain", QuestionsAnswerable: true, CommitSHA: "abc"}
+	reviewed := snapshot("pa-foundation-02", 2, true, "abc")
+	reviewed.Workspace.LatestSubmission = submission("completed")
+	reviewed.Latest = &latestResult{Status: "revise", CommitSHA: "abc"}
+	reworked := reviewed
+	reworked.Repository.CommitSHA = "def"
+	olderVersion := snapshot("pa-foundation-02", 1, true, "abc")
+
+	for name, tc := range map[string]struct {
+		snapshot statusSnapshot
+		want     string
+	}{
+		"transition":    {transition, "apply_update"},
+		"no submission": {fresh, "submit"},
+		"dirty tree":    {dirty, "commit_changes"},
+		"evaluating":    {queued, "wait_result"},
+		"questions":     {questions, "answer_questions,read_result"},
+		"reviewed":      {reviewed, "read_result"},
+		"new commit":    {reworked, "submit"},
+		"older version": {olderVersion, "submit,update_lesson_version"},
+	} {
+		actions := nextActions(ctx, tc.snapshot)
+		if got := codes(actions); got != tc.want {
+			t.Fatalf("%s: next actions = %s, want %s", name, got, tc.want)
+		}
+		if name == "questions" && actions[0].URL != "https://softpractice.example/submissions/"+currentSubmissionID+"/result" {
+			t.Fatalf("questions URL = %q", actions[0].URL)
+		}
+	}
+}
+
+func TestResultAsksToAnswerQuestionsOnTheSite(t *testing.T) {
+	server, _ := evaluationServer(t, currentSubmissionID, func(writer http.ResponseWriter) {
+		body := reviseEvaluationBody(currentSubmissionID)
+		evaluation := body["evaluation"].(map[string]any)
+		evaluation["status"] = "uncertain"
+		review := evaluation["review"].(map[string]any)
+		review["verdict"] = "uncertain"
+		review["uncertainty"] = map[string]any{"blocking": true, "reason": "UNCERTAINTY-REASON"}
+		writeTestJSON(writer, body)
+	})
+	output, _, err := runEvaluation(t, newLearnerUseCases(savedTestClient(t, server.URL), ""), "--id", currentSubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Answer them on the result page: https://softpractice.example/submissions/" + currentSubmissionID + "/result"
+	if !strings.Contains(output, want) || !strings.Contains(output, "UNCERTAINTY-REASON") ||
+		strings.Contains(output, "DEFENSE-QUESTION-TEXT") {
+		t.Fatalf("unexpected output:\n%s", output)
 	}
 }

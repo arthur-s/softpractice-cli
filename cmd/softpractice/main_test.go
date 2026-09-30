@@ -322,7 +322,7 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	}
 	var statusJSON bytes.Buffer
 	if err := status(
-		context.Background(), client, repositoryRoot, []string{"--format", "json"},
+		context.Background(), client, repositoryRoot, []string{"--json"},
 		&statusJSON, &statusErrors,
 	); err != nil {
 		t.Fatal(err)
@@ -338,24 +338,24 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	}
 
 	var submissionJSON bytes.Buffer
-	if err := submissionCommand(
-		context.Background(), client, repositoryRoot,
-		[]string{"show", "--id", submissionID, "--format", "json"},
+	if err := resultCommand(
+		context.Background(), newLearnerUseCases(client, repositoryRoot),
+		[]string{"--id", submissionID, "--json"},
 		&submissionJSON, &statusErrors,
 	); err != nil {
 		t.Fatal(err)
 	}
-	var submissionPayload machineSubmission
+	var submissionPayload machineEvaluationResult
 	if err := decodeTestJSON(submissionJSON.Bytes(), &submissionPayload); err != nil {
 		t.Fatal(err)
 	}
-	if !submissionPayload.Terminal || submissionPayload.Evaluation == nil ||
-		submissionPayload.Evaluation.Status != "revise" ||
-		submissionPayload.Evaluation.DeterministicStatus != "passed" ||
-		submissionPayload.Evaluation.Review == nil ||
-		submissionPayload.Evaluation.Review.Verdict == nil ||
-		*submissionPayload.Evaluation.Review.Verdict != "revise" {
-		t.Fatalf("machine submission = %+v", submissionPayload)
+	if submissionPayload.Outcome != evaluationReady || submissionPayload.Result == nil ||
+		submissionPayload.Result.Status != "revise" ||
+		submissionPayload.Result.Deterministic.Status != "passed" ||
+		submissionPayload.Result.Review == nil ||
+		submissionPayload.Result.Review.Verdict == nil ||
+		*submissionPayload.Result.Review.Verdict != "revise" {
+		t.Fatalf("machine result = %+v", submissionPayload)
 	}
 
 	for range 2 {
@@ -379,6 +379,35 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 		idempotencyKeys[0] == "" ||
 		idempotencyKeys[0] != idempotencyKeys[1] {
 		t.Fatalf("idempotency keys = %v", idempotencyKeys)
+	}
+
+	// submit --wait --json prints only the evaluation on stdout; what is meant
+	// for a person goes to stderr.
+	var waitOutput, waitErrors bytes.Buffer
+	if err := submit(
+		context.Background(), client, repositoryRoot,
+		[]string{"--yes", "--wait", "--json"}, strings.NewReader(""), &waitOutput, &waitErrors,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var waited machineEvaluationResult
+	if err := decodeTestJSON(waitOutput.Bytes(), &waited); err != nil {
+		t.Fatalf("%v\n%s", err, waitOutput.String())
+	}
+	if waited.Outcome != evaluationReady || waited.SubmissionID != submissionID || waited.Result.Status != "revise" ||
+		!strings.Contains(waitErrors.String(), "Submission: "+submissionID) {
+		t.Fatalf("submit --wait = %+v\nstderr: %s", waited, waitErrors.String())
+	}
+
+	var taskOutput bytes.Buffer
+	if err := openCurrent(
+		context.Background(), client, repositoryRoot,
+		[]string{"task", "--no-browser", "--web", "https://app.example"}, &taskOutput, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(taskOutput.String()) != "https://app.example/assignments/pa-foundation-05?version=1" {
+		t.Fatalf("open task output = %q", taskOutput.String())
 	}
 
 	var openOutput, openErrors bytes.Buffer
@@ -440,7 +469,7 @@ func TestSubmissionDownloadCommandSavesOwnedRevisionArchive(t *testing.T) {
 	}
 }
 
-func TestSubmissionShowFallsBackToAcceptedPredecessor(t *testing.T) {
+func TestResultFallsBackToAcceptedPredecessor(t *testing.T) {
 	workspaceID := uuid.NewString()
 	baseRevisionID := uuid.NewString()
 	acceptedSubmissionID := uuid.NewString()
@@ -504,18 +533,18 @@ func TestSubmissionShowFallsBackToAcceptedPredecessor(t *testing.T) {
 	repositoryRoot := createLinkedGitRepository(t, workspaceID)
 
 	var output, errorOutput bytes.Buffer
-	if err := submissionCommand(
-		context.Background(), client, repositoryRoot,
-		[]string{"show", "--format", "json"}, &output, &errorOutput,
+	if err := resultCommand(
+		context.Background(), newLearnerUseCases(client, repositoryRoot),
+		[]string{"--json"}, &output, &errorOutput,
 	); err != nil {
 		t.Fatal(err)
 	}
-	var payload machineSubmission
+	var payload machineEvaluationResult
 	if err := decodeTestJSON(output.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.SubmissionID != acceptedSubmissionID || payload.Evaluation == nil ||
-		payload.Evaluation.Status != "accepted" {
+	if payload.SubmissionID != acceptedSubmissionID || payload.Result == nil ||
+		payload.Result.Status != "accepted" {
 		t.Fatalf("machine submission = %+v", payload)
 	}
 	if !strings.Contains(errorOutput.String(), "pa-foundation-02 has no submission yet") ||

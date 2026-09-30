@@ -98,6 +98,10 @@ func main() {
 			os.Exit(int(status))
 		}
 		fmt.Fprintln(os.Stderr, "softpractice:", err)
+		var usageErr usageError
+		if errors.As(err, &usageErr) {
+			os.Exit(int(exitUsage))
+		}
 		os.Exit(1)
 	}
 }
@@ -122,7 +126,7 @@ func run(
 	apiURL := root.String("api", "", "API base URL")
 	languageValue := root.String("lang", "", "CLI language: ru or en")
 	showVersion := root.Bool("version", false, "print the CLI version and exit")
-	if err := root.Parse(args); err != nil {
+	if err := parseFlags(root, args); err != nil {
 		return err
 	}
 	var languageOverride language
@@ -148,7 +152,7 @@ func run(
 	}
 	if remaining[0] == "help" || remaining[0] == "--help" || remaining[0] == "-h" {
 		if len(remaining) > 2 {
-			return errors.New(text(ctx, "использование: softpractice help [команда]", "usage: softpractice help [command]"))
+			return usage(ctx, "использование: softpractice help [команда]", "usage: softpractice help [command]")
 		}
 		if len(remaining) == 2 {
 			return printCommandHelp(ctx, output, remaining[1])
@@ -158,7 +162,7 @@ func run(
 	}
 	if remaining[0] == "config" {
 		if len(remaining) != 1 {
-			return errors.New(text(ctx, "использование: softpractice config", "usage: softpractice config"))
+			return usage(ctx, "использование: softpractice config", "usage: softpractice config")
 		}
 		settings, err = resolveSettings(config)
 		if err != nil {
@@ -209,7 +213,7 @@ func run(
 		return login(ctx, client, remaining[1:], output, errorOutput)
 	case "logout":
 		if len(remaining) != 1 {
-			return errors.New("usage: softpractice logout")
+			return usageError{message: "usage: softpractice logout"}
 		}
 		if err := client.Logout(ctx); err != nil {
 			return err
@@ -218,12 +222,16 @@ func run(
 		return nil
 	case "status":
 		return status(ctx, client, "", remaining[1:], output, errorOutput)
-	case "submission":
-		return submissionCommand(ctx, client, "", remaining[1:], output, errorOutput)
-	case "evaluation":
-		return evaluationCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
-	case "assignment":
-		return assignmentCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
+	case "task":
+		return taskCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
+	case "material":
+		return materialCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
+	case "hint":
+		return hintCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
+	case "result":
+		return resultCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
+	case "submissions":
+		return submissionsCommand(ctx, newLearnerUseCases(client, ""), remaining[1:], output, errorOutput)
 	case "project":
 		return projectCommand(ctx, client, remaining[1:], output, errorOutput)
 	case "starter":
@@ -235,7 +243,7 @@ func run(
 	case "open":
 		return openCurrent(ctx, client, "", remaining[1:], output, errorOutput)
 	default:
-		return fmt.Errorf(text(ctx, "неизвестная команда %q", "unknown command %q"), remaining[0])
+		return usageError{message: fmt.Sprintf(text(ctx, "неизвестная команда %q", "unknown command %q"), remaining[0])}
 	}
 }
 
@@ -246,21 +254,17 @@ func projectCommand(
 	output, errorOutput io.Writer,
 ) error {
 	if len(args) == 0 || args[0] != "restore" {
-		return errors.New(text(ctx,
-			"использование: softpractice project restore [--practicum ID] [--directory PATH]",
-			"usage: softpractice project restore [--practicum ID] [--directory PATH]"))
+		return usage(ctx, "использование: softpractice project restore [--practicum ID] [--directory PATH]", "usage: softpractice project restore [--practicum ID] [--directory PATH]")
 	}
 	flags := flag.NewFlagSet("project restore", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	practicumID := flags.String("practicum", "", "started practicum ID")
 	directory := flags.String("directory", "", "new destination directory")
-	if err := flags.Parse(args[1:]); err != nil {
+	if err := parseFlags(flags, args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New(text(ctx,
-			"использование: softpractice project restore [--practicum ID] [--directory PATH]",
-			"usage: softpractice project restore [--practicum ID] [--directory PATH]"))
+		return usage(ctx, "использование: softpractice project restore [--practicum ID] [--directory PATH]", "usage: softpractice project restore [--practicum ID] [--directory PATH]")
 	}
 	source, err := client.ResolveProjectRestoreSource(ctx, strings.TrimSpace(*practicumID))
 	if err != nil {
@@ -416,9 +420,7 @@ func showConfig(ctx context.Context, output io.Writer) error {
 
 func setConfig(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) != 2 {
-		return errors.New(text(ctx,
-			"использование: softpractice set api-url|web-url|lang|auto-checks VALUE",
-			"usage: softpractice set api-url|web-url|lang|auto-checks VALUE"))
+		return usage(ctx, "использование: softpractice set api-url|web-url|lang|auto-checks VALUE", "usage: softpractice set api-url|web-url|lang|auto-checks VALUE")
 	}
 	if args[0] == "auto-checks" {
 		return setProjectAutoChecks(ctx, args[1], output)
@@ -446,7 +448,7 @@ func setConfig(ctx context.Context, args []string, output io.Writer) error {
 		}
 		config.Language = string(value)
 	default:
-		return fmt.Errorf(text(ctx, "неизвестная настройка %q", "unknown setting %q"), args[0])
+		return usageError{message: fmt.Sprintf(text(ctx, "неизвестная настройка %q", "unknown setting %q"), args[0])}
 	}
 	if err := settings.Config.Save(config); err != nil {
 		return err
@@ -486,11 +488,11 @@ func downloadStarter(ctx context.Context, client *learnercli.Client, args []stri
 	flags.SetOutput(errorOutput)
 	directory := flags.String("directory", "", "new destination directory")
 	practicumID := flags.String("practicum", "", "started practicum ID")
-	if err := flags.Parse(args); err != nil {
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New(text(ctx, "использование: softpractice starter [--practicum PRACTICUM_ID] [--directory DIRECTORY]", "usage: softpractice starter [--practicum PRACTICUM_ID] [--directory DIRECTORY]"))
+		return usage(ctx, "использование: softpractice starter [--practicum PRACTICUM_ID] [--directory DIRECTORY]", "usage: softpractice starter [--practicum PRACTICUM_ID] [--directory DIRECTORY]")
 	}
 	practicum, err := client.StartedPracticum(ctx, *practicumID)
 	if err != nil {
@@ -630,11 +632,11 @@ func initializeLinkedGit(
 func updateProject(ctx context.Context, client *learnercli.Client, args []string, output, errorOutput io.Writer) error {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
-	if err := flags.Parse(args); err != nil {
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New(text(ctx, "использование: softpractice update", "usage: softpractice update"))
+		return usage(ctx, "использование: softpractice update", "usage: softpractice update")
 	}
 	return newLearnerUseCases(client, "").Update(ctx, output)
 }
@@ -1343,11 +1345,11 @@ func login(
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	noBrowser := flags.Bool("no-browser", false, "print the verification URL without opening it")
-	if err := flags.Parse(args); err != nil {
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New(text(ctx, "использование: softpractice login [--no-browser]", "usage: softpractice login [--no-browser]"))
+		return usage(ctx, "использование: softpractice login [--no-browser]", "usage: softpractice login [--no-browser]")
 	}
 	authorization, err := client.StartLogin(ctx, "softpractice-cli/"+cliVersion)
 	if err != nil {
@@ -1391,23 +1393,19 @@ func status(
 ) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
-	format := flags.String("format", "text", "output format: text or json")
-	if err := flags.Parse(args); err != nil {
+	jsonOutput := jsonFlag(flags)
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: softpractice status [--format text|json]")
+		return usage(ctx, "использование: softpractice status [--json]", "usage: softpractice status [--json]")
 	}
-	outputFormat, err := parseOutputFormat(*format)
+	snapshot, err := newLearnerUseCases(client, startDirectory).Status(ctx)
 	if err != nil {
-		return err
+		return reportJSONError(*jsonOutput, output, err)
 	}
-	snapshot, err := newLearnerUseCases(client, startDirectory).Status(ctx, outputFormat == outputFormatJSON)
-	if err != nil {
-		return err
-	}
-	if outputFormat == outputFormatJSON {
-		return writeStatusJSON(output, snapshot)
+	if *jsonOutput {
+		return writeStatusJSON(ctx, output, snapshot)
 	}
 	repository, link, workspace, user := snapshot.Repository, snapshot.Link, snapshot.Workspace, snapshot.User
 	clean := text(ctx, "чистое", "clean")
@@ -1467,6 +1465,17 @@ func status(
 			workspace.LatestSubmission.JobState,
 			workspace.LatestSubmission.SubmittedAt.Format(time.RFC3339),
 		)
+		if snapshot.Latest != nil {
+			fmt.Fprintf(output, text(ctx, "Результат проверки: %s\n", "Evaluation result: %s\n"),
+				evaluationStatusTitle(ctx, snapshot.Latest.Status))
+		}
+	}
+	for index, action := range nextActions(ctx, snapshot) {
+		label := text(ctx, "Следующий шаг: ", "Next step: ")
+		if index > 0 {
+			label = text(ctx, "Также: ", "Also: ")
+		}
+		fmt.Fprintln(output, label+nextActionText(ctx, action))
 	}
 	return nil
 }
@@ -1500,21 +1509,32 @@ func submit(
 	flags.SetOutput(errorOutput)
 	yes := flags.Bool("yes", false, "submit without an interactive confirmation")
 	checksFlag := flags.Bool("checks", false, "run local public checks before submitting")
-	if err := flags.Parse(args); err != nil {
+	wait := flags.Bool("wait", false, "wait for the evaluation result after submitting")
+	timeout := flags.Duration("timeout", defaultEvaluationTimeout, "maximum wait with --wait")
+	jsonOutput := jsonFlag(flags)
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
-		return errors.New(text(ctx, "использование: softpractice submit [--yes]", "usage: softpractice submit [--yes]"))
+	if flags.NArg() != 0 || *timeout < 0 {
+		return usage(ctx,
+			"использование: softpractice submit [--yes] [--checks=true|false] [--wait] [--timeout DURATION] [--json]",
+			"usage: softpractice submit [--yes] [--checks=true|false] [--wait] [--timeout DURATION] [--json]")
+	}
+	// With --json, stdout carries only the JSON document; everything meant
+	// for a person goes to stderr.
+	human := output
+	if *jsonOutput {
+		human = errorOutput
 	}
 	useCases := newLearnerUseCases(client, startDirectory)
 	prepared, err := useCases.PrepareSubmission(ctx)
 	if err != nil {
-		return err
+		return reportJSONError(*jsonOutput, output, err)
 	}
 	defer prepared.Close()
 	repository, link, workspace := prepared.Repository, prepared.Link, prepared.Workspace
 	fmt.Fprintf(
-		output,
+		human,
 		text(ctx, "Проект: %s\nУрок: %s v%d — %s\n\n", "Project: %s\nAssignment: %s v%d — %s\n\n"),
 		link.ProjectID,
 		workspace.Assignment.ID,
@@ -1522,7 +1542,7 @@ func submit(
 		workspace.Assignment.Title,
 	)
 	fmt.Fprintf(
-		output,
+		human,
 		text(ctx, "Commit: %s\nФайлы: %d\nСжатый размер: %s\n", "Commit: %s\nFiles: %d\nCompressed size: %s\n"),
 		repository.CommitSHA,
 		len(repository.Files),
@@ -1540,36 +1560,36 @@ func submit(
 	if !explicit {
 		enabled, err = projectAutoChecks(ctx, repository.Root)
 		if err != nil {
-			return err
+			return reportJSONError(*jsonOutput, output, err)
 		}
 	}
 	if enabled {
-		if err := runSubmissionChecks(ctx, repository, output, errorOutput); err != nil {
-			return err
+		if err := runSubmissionChecks(ctx, repository, human, errorOutput); err != nil {
+			return reportJSONError(*jsonOutput, output, err)
 		}
 	} else {
-		fmt.Fprintln(output, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для отдельного локального запуска: softpractice check.", "Local checks were not run. The server will check your solution. To run them separately: softpractice check."))
+		fmt.Fprintln(human, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для отдельного локального запуска: softpractice check.", "Local checks were not run. The server will check your solution. To run them separately: softpractice check."))
 	}
 	if !*yes {
-		confirmed, err := confirmSubmission(ctx, input, output)
+		confirmed, err := confirmSubmission(ctx, input, human)
 		if err != nil {
-			return err
+			return reportJSONError(*jsonOutput, output, err)
 		}
 		if !confirmed {
-			fmt.Fprintln(output, text(ctx, "Отправка отменена.", "Submission cancelled."))
+			fmt.Fprintln(human, text(ctx, "Отправка отменена.", "Submission cancelled."))
 			return nil
 		}
 	}
 	receipt, err := useCases.SendSubmission(ctx, prepared)
 	if err != nil {
-		return err
+		return reportJSONError(*jsonOutput, output, err)
 	}
 	replay := ""
 	if receipt.Replayed {
-		replay = " (already submitted)"
+		replay = text(ctx, " (уже была отправлена)", " (already submitted)")
 	}
 	fmt.Fprintf(
-		output,
+		human,
 		text(ctx, "Отправка: %s%s\nСостояние проверки: %s\n", "Submission: %s%s\nEvaluation state: %s\n"),
 		receipt.SubmissionID,
 		replay,
@@ -1579,13 +1599,40 @@ func submit(
 		// The submission is accepted and evaluated as usual. The notice only
 		// says a newer version exists; updating stays the learner's choice.
 		fmt.Fprintf(
-			output,
+			human,
 			text(ctx, "\nУрок обновлён: %s v%d → v%d. Решение принято и проверяется как обычно. Чтобы перейти на новую версию, выполните `softpractice update`.\n",
 				"\nLesson updated: %s v%d → v%d. Your submission is accepted and evaluated as usual. To move to the new version, run `softpractice update`.\n"),
 			update.AssignmentID, update.SubmittedVersion, update.CurrentVersion,
 		)
 	}
-	return nil
+	if !*wait {
+		if *jsonOutput {
+			return writeMachineJSON(output, machineSubmissionReceipt{
+				Kind: "softpractice.submission", SubmissionID: receipt.SubmissionID, RevisionID: receipt.RevisionID,
+				EvaluationJobID: receipt.EvaluationJobID, JobState: receipt.JobState, Replayed: receipt.Replayed,
+				SubmittedAt: receipt.SubmittedAt, ResultURL: webResultURL(ctx, receipt.SubmissionID),
+				LessonUpdate: receipt.LessonUpdate,
+			})
+		}
+		fmt.Fprintln(human, text(ctx, "Результат: `softpractice result --wait`", "Result: `softpractice result --wait`"))
+		return nil
+	}
+	fmt.Fprintln(human, text(ctx, "Ждём результат проверки…\n", "Waiting for the evaluation…\n"))
+	return reportJSONError(*jsonOutput, output, printEvaluation(ctx, useCases, receipt.SubmissionID,
+		evaluationWait{Wait: true, Timeout: *timeout}, false, *jsonOutput, output))
+}
+
+// machineSubmissionReceipt is what `submit --json` prints without --wait.
+type machineSubmissionReceipt struct {
+	Kind            string              `json:"kind"`
+	SubmissionID    string              `json:"submission_id"`
+	RevisionID      string              `json:"revision_id"`
+	EvaluationJobID string              `json:"evaluation_job_id"`
+	JobState        string              `json:"job_state"`
+	Replayed        bool                `json:"replayed"`
+	SubmittedAt     time.Time           `json:"submitted_at"`
+	ResultURL       string              `json:"result_url"`
+	LessonUpdate    *lessonUpdateNotice `json:"lesson_update,omitempty"`
 }
 
 // submittedLessonVersion is the lesson version this folder's tree was made
@@ -1649,11 +1696,18 @@ func openCurrent(
 		"web app base URL",
 	)
 	noBrowser := flags.Bool("no-browser", false, "print without opening a browser")
-	if err := flags.Parse(args); err != nil {
+	usageErr := usage(ctx,
+		"использование: softpractice open [task|material|result] [--web URL] [--no-browser]",
+		"usage: softpractice open [task|material|result] [--web URL] [--no-browser]")
+	page := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		page, args = args[0], args[1:]
+	}
+	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
-		return errors.New(text(ctx, "использование: softpractice open [--web URL] [--no-browser]", "usage: softpractice open [--web URL] [--no-browser]"))
+	if flags.NArg() != 0 || (page != "" && page != "task" && page != "material" && page != "result") {
+		return usageErr
 	}
 	if err := validateWebURL(*webURL); err != nil {
 		return err
@@ -1662,10 +1716,29 @@ func openCurrent(
 	if err != nil {
 		return err
 	}
-	target := strings.TrimRight(*webURL, "/") + "/workspaces/" + link.WorkspaceID
-	if workspace.LatestSubmission != nil {
-		target = strings.TrimRight(*webURL, "/") +
-			"/submissions/" + workspace.LatestSubmission.ID + "/result"
+	settings := settingsFromContext(ctx)
+	settings.WebURL = *webURL
+	ctx = withSettings(ctx, settings)
+	version := submittedLessonVersion(link, workspace)
+	if page == "" {
+		// Without a page: the latest result, or the task before the first
+		// submission of this lesson.
+		page = "task"
+		if workspace.LatestSubmission != nil {
+			page = "result"
+		}
+	}
+	var target string
+	switch page {
+	case "task":
+		target = webLessonURL(ctx, workspace.Assignment.ID, version, "")
+	case "material":
+		target = webLessonURL(ctx, workspace.Assignment.ID, version, "/material")
+	case "result":
+		if workspace.LatestSubmission == nil {
+			return fmt.Errorf(text(ctx, "по уроку %s отправок пока нет", "lesson %s has no submissions yet"), workspace.Assignment.ID)
+		}
+		target = webResultURL(ctx, workspace.LatestSubmission.ID)
 	}
 	fmt.Fprintln(output, target)
 	if *noBrowser {

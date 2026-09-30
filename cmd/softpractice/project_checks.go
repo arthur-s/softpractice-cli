@@ -46,7 +46,7 @@ func setProjectAutoChecks(ctx context.Context, value string, output io.Writer) e
 
 func checkProject(ctx context.Context, startDirectory string, args []string, output, errorOutput io.Writer) error {
 	if len(args) != 0 {
-		return errors.New(text(ctx, "использование: softpractice check", "usage: softpractice check"))
+		return usage(ctx, "использование: softpractice check", "usage: softpractice check")
 	}
 	repository, err := inspectGitRepository(ctx, startDirectory, false)
 	if err != nil {

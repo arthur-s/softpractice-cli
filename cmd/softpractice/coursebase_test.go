@@ -123,7 +123,7 @@ func TestStatusReportsAPendingTransitionAndScopesTheSubmissionLine(t *testing.T)
 
 	var machineOutput bytes.Buffer
 	if err := status(
-		context.Background(), client, root, []string{"--format", "json"}, &machineOutput, &errorOutput,
+		context.Background(), client, root, []string{"--json"}, &machineOutput, &errorOutput,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestMachineStatusOmitsTransitionWhenTheProjectIsOnTheCurrentLesson(t *testi
 
 	var output, errorOutput bytes.Buffer
 	if err := status(
-		context.Background(), client, root, []string{"--format", "json"}, &output, &errorOutput,
+		context.Background(), client, root, []string{"--json"}, &output, &errorOutput,
 	); err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// reviewFeedbackDetail says how much of an evaluation the `evaluation` command
+// reviewFeedbackDetail says how much of an evaluation the `result` command
 // prints, in both text and JSON.
 type reviewFeedbackDetail string
 
@@ -32,7 +32,7 @@ const (
 const defaultReviewFeedback = feedbackWithoutDirections
 
 // evaluationSource decodes the public evaluation projection that the
-// `evaluation` command renders.
+// `result` command renders.
 type evaluationSource struct {
 	ExerciseID     string `json:"exercise_id"`
 	Status         string `json:"status"`
@@ -131,6 +131,10 @@ type machineReviewResult struct {
 	// QuestionsCount is how many questions the reviewer asked the learner.
 	// Their text is on the result page.
 	QuestionsCount int `json:"questions_count"`
+	// QuestionsAnswerable is true when the learner is expected to answer the
+	// questions on the result page: an authoritative uncertain review. Other
+	// questions are for self-check.
+	QuestionsAnswerable bool `json:"questions_answerable"`
 }
 
 type machineUncertainty struct {
@@ -197,6 +201,8 @@ func buildMachineResult(raw json.RawMessage, detail reviewFeedbackDetail) (*mach
 			Rubric:         make([]machineRubricItem, 0, len(review.Rubric)),
 			Findings:       make([]machineReviewFinding, 0, len(review.Feedback)),
 			QuestionsCount: len(review.Questions),
+			QuestionsAnswerable: review.Authoritative && review.Verdict != nil && *review.Verdict == "uncertain" &&
+				len(review.Questions) > 0,
 		}
 		if uncertainty := review.Uncertainty; uncertainty != nil {
 			part.Uncertainty = &machineUncertainty{Blocking: uncertainty.Blocking, Reason: uncertainty.Reason}

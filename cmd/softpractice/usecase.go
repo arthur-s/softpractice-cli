@@ -47,17 +47,29 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 }
 
 // statusSnapshot is the linked project, its workspace, and the signed-in
-// learner. LatestEvaluationStatus is set only when it was requested and the
-// latest submission already has a terminal evaluation.
+// learner. Latest is set once the latest submission has a terminal
+// evaluation, and only when reading it succeeded.
 type statusSnapshot struct {
-	Repository             gitRepository
-	Link                   learnercli.ProjectLink
-	Workspace              learnercli.WorkspaceStatus
-	User                   currentUser
-	LatestEvaluationStatus string
+	Repository gitRepository
+	Link       learnercli.ProjectLink
+	Workspace  learnercli.WorkspaceStatus
+	User       currentUser
+	Latest     *latestResult
 }
 
-func (u learnerUseCases) Status(ctx context.Context, withEvaluation bool) (statusSnapshot, error) {
+// latestResult is what the next step depends on in a terminal evaluation of
+// the latest submission.
+type latestResult struct {
+	Status string
+	// QuestionsAnswerable is true when the reviewer's questions can be
+	// answered on the result page: an authoritative uncertain review.
+	QuestionsAnswerable bool
+	// CommitSHA is the commit the submission was made from; empty when the
+	// API did not return it.
+	CommitSHA string
+}
+
+func (u learnerUseCases) Status(ctx context.Context) (statusSnapshot, error) {
 	repository, link, workspace, err := linkedWorkspace(ctx, u.client, u.startDirectory, false)
 	if err != nil {
 		return statusSnapshot{}, err
@@ -67,27 +79,63 @@ func (u learnerUseCases) Status(ctx context.Context, withEvaluation bool) (statu
 		return statusSnapshot{}, err
 	}
 	snapshot := statusSnapshot{Repository: repository, Link: link, Workspace: workspace, User: user}
-	if withEvaluation && workspace.LatestSubmission != nil {
-		switch workspace.LatestSubmission.JobState {
-		case "completed", "failed":
-			// The status stays available when only this optional field fails.
-			result, err := u.Evaluation(ctx, workspace.LatestSubmission.ID, evaluationWait{})
-			if err == nil && result.Outcome == evaluationReady && result.Submission.Evaluation != nil {
-				snapshot.LatestEvaluationStatus = result.Submission.Evaluation.Status
+	if latest := workspace.LatestSubmission; latest != nil && (latest.JobState == "completed" || latest.JobState == "failed") {
+		// The status stays available when only these optional reads fail.
+		if result, err := u.Evaluation(ctx, latest.ID, evaluationWait{}); err == nil && result.Outcome == evaluationReady {
+			if built, err := buildMachineResult(result.RawEvaluation, defaultReviewFeedback); err == nil {
+				snapshot.Latest = &latestResult{
+					Status:              built.Status,
+					QuestionsAnswerable: built.Review != nil && built.Review.QuestionsAnswerable,
+				}
+				snapshot.Latest.CommitSHA, _ = u.SubmittedCommit(ctx, latest.ID)
 			}
 		}
 	}
 	return snapshot, nil
 }
 
-// assignmentSnapshot is the requirement the linked folder is working on: the
-// lesson version its tree was made for, and the theory material linked to it
-// when the lesson has one.
-type assignmentSnapshot struct {
-	Link       learnercli.ProjectLink
-	Workspace  learnercli.WorkspaceStatus
-	Assignment assignmentDetail
-	Material   *theoryMaterial
+// SubmittedCommit returns the Git commit a submission was made from.
+func (u learnerUseCases) SubmittedCommit(ctx context.Context, submissionID string) (string, error) {
+	if err := validateSubmissionID(submissionID); err != nil {
+		return "", err
+	}
+	var submission struct {
+		ID       string `json:"id"`
+		Revision struct {
+			CommitSHA string `json:"commit_sha"`
+		} `json:"revision"`
+	}
+	if err := u.client.AuthorizedJSON(ctx, "GET", "/v1/submissions/"+submissionID, nil, &submission); err != nil {
+		return "", err
+	}
+	if submission.ID != submissionID {
+		return "", errors.New("submission response does not match the requested submission")
+	}
+	return submission.Revision.CommitSHA, nil
+}
+
+// lessonContext names the lesson the linked folder is working on: the
+// current lesson, at the version its tree was made for.
+type lessonContext struct {
+	Link         learnercli.ProjectLink
+	Workspace    learnercli.WorkspaceStatus
+	AssignmentID string
+	Version      int
+}
+
+func (u learnerUseCases) Lesson(ctx context.Context) (lessonContext, error) {
+	_, link, workspace, err := linkedWorkspace(ctx, u.client, u.startDirectory, false)
+	if err != nil {
+		return lessonContext{}, err
+	}
+	return lessonContext{
+		Link: link, Workspace: workspace,
+		AssignmentID: workspace.Assignment.ID, Version: submittedLessonVersion(link, workspace),
+	}, nil
+}
+
+func (l lessonContext) query() string {
+	return "?version=" + strconv.Itoa(l.Version)
 }
 
 type assignmentDetail struct {
@@ -102,35 +150,65 @@ type assignmentDetail struct {
 	ContentSHA256        string `json:"content_sha256"`
 }
 
-type theoryMaterial struct {
-	ID               string          `json:"id"`
-	Title            string          `json:"title"`
-	EstimatedMinutes int             `json:"estimated_minutes"`
-	Markdown         string          `json:"markdown"`
-	Diagram          json.RawMessage `json:"diagram"`
-}
-
-func (u learnerUseCases) Assignment(ctx context.Context) (assignmentSnapshot, error) {
-	_, link, workspace, err := linkedWorkspace(ctx, u.client, u.startDirectory, false)
+// Task returns the assignment text of the folder's lesson.
+func (u learnerUseCases) Task(ctx context.Context) (lessonContext, assignmentDetail, error) {
+	lesson, err := u.Lesson(ctx)
 	if err != nil {
-		return assignmentSnapshot{}, err
+		return lessonContext{}, assignmentDetail{}, err
 	}
-	id := workspace.Assignment.ID
-	version := submittedLessonVersion(link, workspace)
-	query := "?version=" + strconv.Itoa(version)
 	var assignment assignmentDetail
 	if err := u.client.AuthorizedJSON(
-		ctx, "GET", "/v1/assignments/"+url.PathEscape(id)+query, nil, &assignment,
+		ctx, "GET", "/v1/assignments/"+url.PathEscape(lesson.AssignmentID)+lesson.query(), nil, &assignment,
 	); err != nil {
-		return assignmentSnapshot{}, err
+		return lessonContext{}, assignmentDetail{}, err
 	}
-	if assignment.ID != id || assignment.Version != version {
-		return assignmentSnapshot{}, errors.New("assignment response does not match the requested lesson")
+	if assignment.ID != lesson.AssignmentID || assignment.Version != lesson.Version {
+		return lessonContext{}, assignmentDetail{}, errors.New("assignment response does not match the requested lesson")
 	}
-	snapshot := assignmentSnapshot{Link: link, Workspace: workspace, Assignment: assignment}
+	return lesson, assignment, nil
+}
+
+type theoryMaterial struct {
+	ID               string        `json:"id"`
+	Title            string        `json:"title"`
+	EstimatedMinutes int           `json:"estimated_minutes"`
+	Markdown         string        `json:"markdown"`
+	Diagram          theoryDiagram `json:"diagram"`
+}
+
+type theoryDiagram struct {
+	Title           string `json:"title"`
+	TextAlternative string `json:"text_alternative"`
+	Nodes           []struct {
+		Title string `json:"title"`
+		Text  string `json:"text"`
+	} `json:"nodes"`
+}
+
+// materialSnapshot is the theory material of one lesson. Material is nil when
+// the lesson has none. Version is zero for a lesson named explicitly: the API
+// then serves its current published version.
+type materialSnapshot struct {
+	AssignmentID string
+	Version      int
+	Material     *theoryMaterial
+}
+
+// Material returns the theory material of the folder's lesson, or of
+// lessonID when it is set, such as an earlier lesson of the practicum.
+func (u learnerUseCases) Material(ctx context.Context, lessonID string) (materialSnapshot, error) {
+	snapshot := materialSnapshot{AssignmentID: lessonID}
+	query := ""
+	if lessonID == "" {
+		lesson, err := u.Lesson(ctx)
+		if err != nil {
+			return materialSnapshot{}, err
+		}
+		snapshot.AssignmentID, snapshot.Version, query = lesson.AssignmentID, lesson.Version, lesson.query()
+	}
 	var material theoryMaterial
-	err = u.client.AuthorizedJSON(
-		ctx, "GET", "/v1/assignments/"+url.PathEscape(id)+"/material"+query, nil, &material,
+	err := u.client.AuthorizedJSON(
+		ctx, "GET", "/v1/assignments/"+url.PathEscape(snapshot.AssignmentID)+"/material"+query, nil, &material,
 	)
 	var statusError *learnercli.HTTPError
 	switch {
@@ -139,9 +217,93 @@ func (u learnerUseCases) Assignment(ctx context.Context) (assignmentSnapshot, er
 	case errors.As(err, &statusError) && statusError.Status == http.StatusNotFound:
 		// The lesson has no linked theory material.
 	default:
-		return assignmentSnapshot{}, err
+		return materialSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+type preparedHint struct {
+	ID       string `json:"id"`
+	Order    int    `json:"order"`
+	Markdown string `json:"markdown"`
+}
+
+// hintsSnapshot lists the prepared hints the learner has already opened for
+// the folder's lesson. Status is available while a closed hint remains,
+// exhausted when all are open, and unavailable when the lesson has none.
+// Opening the next hint is a learner action on the assignment page.
+type hintsSnapshot struct {
+	Lesson   lessonContext
+	Status   string
+	Revealed []preparedHint
+}
+
+func (u learnerUseCases) Hints(ctx context.Context) (hintsSnapshot, error) {
+	lesson, err := u.Lesson(ctx)
+	if err != nil {
+		return hintsSnapshot{}, err
+	}
+	var state struct {
+		Status   string         `json:"status"`
+		Revealed []preparedHint `json:"revealed"`
+	}
+	if err := u.client.AuthorizedJSON(
+		ctx, "GET", "/v1/assignments/"+url.PathEscape(lesson.AssignmentID)+"/prepared-hints"+lesson.query(), nil, &state,
+	); err != nil {
+		return hintsSnapshot{}, err
+	}
+	if state.Revealed == nil {
+		state.Revealed = []preparedHint{}
+	}
+	return hintsSnapshot{Lesson: lesson, Status: state.Status, Revealed: state.Revealed}, nil
+}
+
+type submissionAttempt struct {
+	SubmissionID     string    `json:"submission_id"`
+	LearningAttempt  int       `json:"learning_attempt"`
+	JobState         string    `json:"job_state"`
+	EvaluationStatus *string   `json:"evaluation_status"`
+	SubmittedAt      time.Time `json:"submitted_at"`
+}
+
+// submissionsSnapshot is the recent submission history of the folder's
+// lesson, newest first. The API returns at most five entries.
+type submissionsSnapshot struct {
+	Lesson  lessonContext
+	History []submissionAttempt
+}
+
+func (u learnerUseCases) Submissions(ctx context.Context) (submissionsSnapshot, error) {
+	lesson, err := u.Lesson(ctx)
+	if err != nil {
+		return submissionsSnapshot{}, err
+	}
+	snapshot := submissionsSnapshot{Lesson: lesson, History: []submissionAttempt{}}
+	latest := lesson.Workspace.LatestSubmission
+	if latest == nil {
+		return snapshot, nil
+	}
+	if err := validateSubmissionID(latest.ID); err != nil {
+		return submissionsSnapshot{}, err
+	}
+	var iteration struct {
+		History []submissionAttempt `json:"history"`
+	}
+	if err := u.client.AuthorizedJSON(ctx, "GET", "/v1/submissions/"+latest.ID+"/iteration", nil, &iteration); err != nil {
+		return submissionsSnapshot{}, err
+	}
+	if iteration.History != nil {
+		snapshot.History = iteration.History
+	}
+	return snapshot, nil
+}
+
+func validateSubmissionID(submissionID string) error {
+	parsed, err := uuid.Parse(submissionID)
+	if err != nil || parsed.String() != submissionID {
+		return errors.New("submission ID must be a canonical UUID")
+	}
+	return nil
 }
 
 // preparedSubmission is a linked, clean, submittable commit with its archive
@@ -279,9 +441,8 @@ func (u learnerUseCases) Evaluation(
 	submissionID string,
 	wait evaluationWait,
 ) (evaluationResult, error) {
-	parsedID, err := uuid.Parse(submissionID)
-	if err != nil || parsedID.String() != submissionID {
-		return evaluationResult{}, errors.New("submission ID must be a canonical UUID")
+	if err := validateSubmissionID(submissionID); err != nil {
+		return evaluationResult{}, err
 	}
 	deadline := u.now().Add(wait.Timeout)
 	path := "/v1/submissions/" + submissionID + "/evaluation"
