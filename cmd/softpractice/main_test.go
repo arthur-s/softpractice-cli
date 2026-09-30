@@ -1691,43 +1691,7 @@ func TestUpdateRefreshesTheLessonVersionWithoutTouchingLearnerFiles(t *testing.T
 // update. `update` replaces exactly those files and nothing the learner wrote.
 func TestUpdateReplacesRefactoredAuthorFilesAndKeepsLearnerWork(t *testing.T) {
 	workspaceID := uuid.NewString()
-	payloadRoot := t.TempDir()
-	refactored := []byte("# refactored author module\n")
-	if err := os.WriteFile(filepath.Join(payloadRoot, "main.py"), refactored, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(refactored)
-	var archive bytes.Buffer
-	metadata, err := starterbundle.Build(payloadRoot, []starterbundle.File{
-		{Path: "main.py", SHA256: hex.EncodeToString(digest[:])},
-	}, &archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const ref = "pa-foundation-01-v1-to-pa-foundation-01-v2@1.0.0"
-	server := lessonBumpServer(t, workspaceID, func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v1/workspaces/" + workspaceID + "/current-assignment/lesson-version-update":
-			writeTestJSON(writer, map[string]any{
-				"ref": ref, "assignment_id": "pa-foundation-01", "from_version": 1, "to_version": 2,
-				"archive_sha256": metadata.SHA256, "archive_size": metadata.Size,
-				"files":      []any{map[string]any{"path": "main.py", "sha256": hex.EncodeToString(digest[:])}},
-				"operations": []any{map[string]any{"kind": "replace", "path": "main.py"}},
-			})
-		case "/v1/workspaces/" + workspaceID + "/current-assignment/lesson-version-update/archive":
-			if request.URL.Query().Get("from_version") != "1" {
-				http.NotFound(writer, request)
-				return
-			}
-			writer.Header().Set("Content-Type", "application/gzip")
-			writer.Header().Set("Content-Length", fmt.Sprint(metadata.Size))
-			writer.Header().Set("X-Softpractice-Course-Update-SHA256", metadata.SHA256)
-			writer.Header().Set("X-Softpractice-Course-Update-Ref", ref)
-			_, _ = writer.Write(archive.Bytes())
-		default:
-			http.NotFound(writer, request)
-		}
-	})
+	server, refactored := refactoredLessonServer(t, workspaceID)
 	defer server.Close()
 	client := savedTestClient(t, server.URL)
 	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)

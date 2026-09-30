@@ -29,18 +29,14 @@ type machineEvaluationResult struct {
 
 // buildMachineEvaluationResult projects one evaluation; resultURL is its
 // result page.
-func buildMachineEvaluationResult(
-	result evaluationResult,
-	resultURL string,
-	detail reviewFeedbackDetail,
-) (machineEvaluationResult, error) {
+func buildMachineEvaluationResult(result evaluationResult, resultURL string) machineEvaluationResult {
 	payload := machineEvaluationResult{
 		Kind: "softpractice.evaluation", Outcome: result.Outcome, SubmissionID: result.SubmissionID,
 		ResultURL: resultURL,
 	}
 	if result.Outcome == evaluationSuperseded {
 		payload.JobState = "superseded"
-		return payload, nil
+		return payload
 	}
 	submission := result.Submission
 	updatedAt := submission.UpdatedAt
@@ -50,14 +46,8 @@ func buildMachineEvaluationResult(
 	payload.MaxAttempts = submission.MaxAttempts
 	payload.NextPollSeconds = submission.NextPollSeconds
 	payload.UpdatedAt = &updatedAt
-	if result.Outcome == evaluationReady {
-		built, err := buildMachineResult(result.RawEvaluation, detail)
-		if err != nil {
-			return machineEvaluationResult{}, err
-		}
-		payload.Result = built
-	}
-	return payload, nil
+	payload.Result = result.Result
+	return payload
 }
 
 func resultCommand(
@@ -117,14 +107,11 @@ func printEvaluation(
 	if directions {
 		detail = feedbackWithDirections
 	}
-	result, err := useCases.Evaluation(ctx, submissionID, wait)
+	result, err := useCases.Evaluation(ctx, submissionID, wait, detail)
 	if err != nil {
 		return err
 	}
-	payload, err := buildMachineEvaluationResult(result, webResultURL(ctx, submissionID), detail)
-	if err != nil {
-		return err
-	}
+	payload := buildMachineEvaluationResult(result, webResultURL(ctx, submissionID))
 	if jsonOutput {
 		if err := writeMachineJSON(output, payload); err != nil {
 			return err

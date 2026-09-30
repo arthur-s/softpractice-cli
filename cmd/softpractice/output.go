@@ -127,6 +127,8 @@ func errorCode(err error) string {
 		return "project_not_linked"
 	case errors.Is(err, errNotGitRepository):
 		return "not_git_repository"
+	case errors.Is(err, errChecksNotPublished):
+		return "checks_not_published"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return "cancelled"
 	case errors.As(err, &statusError):

@@ -330,7 +330,7 @@ func TestEvaluationWaitStopsWhenCancelled(t *testing.T) {
 		cancel()
 		return sleepContext(sleepCtx, delay)
 	}
-	_, err := useCases.Evaluation(ctx, currentSubmissionID, evaluationWait{Wait: true, Timeout: time.Hour})
+	_, err := useCases.Evaluation(ctx, currentSubmissionID, evaluationWait{Wait: true, Timeout: time.Hour}, defaultReviewFeedback)
 	if !errors.Is(err, context.Canceled) || *calls != 1 || errorCode(err) != "cancelled" {
 		t.Fatalf("err = %v, calls = %d", err, *calls)
 	}

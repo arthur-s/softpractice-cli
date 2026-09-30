@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -81,14 +80,14 @@ func (u learnerUseCases) Status(ctx context.Context) (statusSnapshot, error) {
 	snapshot := statusSnapshot{Repository: repository, Link: link, Workspace: workspace, User: user}
 	if latest := workspace.LatestSubmission; latest != nil && (latest.JobState == "completed" || latest.JobState == "failed") {
 		// The status stays available when only these optional reads fail.
-		if result, err := u.Evaluation(ctx, latest.ID, evaluationWait{}); err == nil && result.Outcome == evaluationReady {
-			if built, err := buildMachineResult(result.RawEvaluation, defaultReviewFeedback); err == nil {
-				snapshot.Latest = &latestResult{
-					Status:              built.Status,
-					QuestionsAnswerable: built.Review != nil && built.Review.QuestionsAnswerable,
-				}
-				snapshot.Latest.CommitSHA, _ = u.SubmittedCommit(ctx, latest.ID)
+		if result, err := u.Evaluation(ctx, latest.ID, evaluationWait{}, defaultReviewFeedback); err == nil &&
+			result.Outcome == evaluationReady {
+			built := result.Result
+			snapshot.Latest = &latestResult{
+				Status:              built.Status,
+				QuestionsAnswerable: built.Review != nil && built.Review.QuestionsAnswerable,
 			}
+			snapshot.Latest.CommitSHA, _ = u.SubmittedCommit(ctx, latest.ID)
 		}
 	}
 	return snapshot, nil
@@ -366,10 +365,18 @@ func (u learnerUseCases) SendSubmission(ctx context.Context, prepared preparedSu
 	return receipt, nil
 }
 
-// Update applies the pending lesson transition or lesson version update to
-// the linked folder, with every check `softpractice update` makes.
-func (u learnerUseCases) Update(ctx context.Context, output io.Writer) error {
-	return updateLinkedProject(ctx, u.client, u.startDirectory, "", output)
+// PrepareUpdate makes every check `softpractice update` makes and returns
+// the pending lesson transition, lesson version update, or missing public
+// checks as a plan. It changes nothing: the caller shows the learner what
+// will change and asks for confirmation before ApplyUpdate.
+func (u learnerUseCases) PrepareUpdate(ctx context.Context) (updatePlan, error) {
+	return prepareProjectUpdate(ctx, u.client, u.startDirectory, "")
+}
+
+// ApplyUpdate applies a prepared plan, provided the folder has not moved
+// since it was prepared. Its report for the learner goes to output.
+func (u learnerUseCases) ApplyUpdate(ctx context.Context, plan updatePlan, output io.Writer) error {
+	return applyProjectUpdate(ctx, u.client, plan, output)
 }
 
 // latestSubmission names the linked workspace's newest submission. Right
@@ -431,15 +438,20 @@ const defaultEvaluationPoll = 2 * time.Second
 type evaluationResult struct {
 	Outcome      evaluationOutcome
 	SubmissionID string
-	// Submission and RawEvaluation are set for ready and pending outcomes.
-	Submission    machineSubmission
-	RawEvaluation json.RawMessage
+	// Submission is set for ready and pending outcomes.
+	Submission machineSubmission
+	// Result is the evaluation projected at the requested detail; it is set
+	// only for the ready outcome. The raw API projection, which carries the
+	// reviewer's directions and questions, never leaves this use case.
+	Result *machineResult
 }
 
+// Evaluation reads or waits for one evaluation and projects it at detail.
 func (u learnerUseCases) Evaluation(
 	ctx context.Context,
 	submissionID string,
 	wait evaluationWait,
+	detail reviewFeedbackDetail,
 ) (evaluationResult, error) {
 	if err := validateSubmissionID(submissionID); err != nil {
 		return evaluationResult{}, err
@@ -463,9 +475,13 @@ func (u learnerUseCases) Evaluation(
 				return evaluationResult{}, errors.New("evaluation response does not match the requested submission")
 			}
 			if payload.Terminal {
+				built, err := buildMachineResult(response.Evaluation, detail)
+				if err != nil {
+					return evaluationResult{}, err
+				}
 				return evaluationResult{
 					Outcome: evaluationReady, SubmissionID: submissionID,
-					Submission: payload, RawEvaluation: response.Evaluation,
+					Submission: payload, Result: built,
 				}, nil
 			}
 			pending = evaluationResult{Outcome: evaluationPending, SubmissionID: submissionID, Submission: payload}
