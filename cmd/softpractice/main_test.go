@@ -399,6 +399,38 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 		t.Fatalf("submit --wait = %+v\nstderr: %s", waited, waitErrors.String())
 	}
 
+	// Without --wait, submit --json prints the receipt as its one document.
+	var receiptOutput bytes.Buffer
+	if err := submit(
+		context.Background(), client, repositoryRoot,
+		[]string{"--yes", "--json"}, strings.NewReader(""), &receiptOutput, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	var receipt machineSubmissionReceipt
+	if err := decodeTestJSON(receiptOutput.Bytes(), &receipt); err != nil {
+		t.Fatalf("%v\n%s", err, receiptOutput.String())
+	}
+	if receipt.Kind != "softpractice.submission" || receipt.SubmissionID != submissionID {
+		t.Fatalf("submit --json = %+v", receipt)
+	}
+
+	// Declining the confirmation is not a success: nothing is sent, and
+	// stdout still carries one document that says so.
+	uploadsBefore := len(idempotencyKeys)
+	var declinedOutput bytes.Buffer
+	err = submit(
+		context.Background(), client, repositoryRoot,
+		[]string{"--json"}, strings.NewReader("n\n"), &declinedOutput, &bytes.Buffer{},
+	)
+	var declined machineError
+	if decodeErr := decodeTestJSON(declinedOutput.Bytes(), &declined); decodeErr != nil {
+		t.Fatalf("%v\n%s", decodeErr, declinedOutput.String())
+	}
+	if err == nil || declined.Error.Code != "declined" || len(idempotencyKeys) != uploadsBefore {
+		t.Fatalf("declined submit: err = %v, payload = %+v, uploads = %d", err, declined, len(idempotencyKeys))
+	}
+
 	var taskOutput bytes.Buffer
 	if err := openCurrent(
 		context.Background(), client, repositoryRoot,
@@ -408,6 +440,18 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	}
 	if strings.TrimSpace(taskOutput.String()) != "https://app.example/assignments/pa-foundation-05?version=1" {
 		t.Fatalf("open task output = %q", taskOutput.String())
+	}
+
+	// The page may also follow the flags.
+	var materialOutput bytes.Buffer
+	if err := openCurrent(
+		context.Background(), client, repositoryRoot,
+		[]string{"--no-browser", "material", "--web", "https://app.example"}, &materialOutput, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(materialOutput.String()) != "https://app.example/assignments/pa-foundation-05/material?version=1" {
+		t.Fatalf("open material output = %q", materialOutput.String())
 	}
 
 	var openOutput, openErrors bytes.Buffer

@@ -126,7 +126,8 @@ you answer them.
 
 `status`, `task`, `material`, `hint`, `result`, `submissions`, and `submit`
 accept `--json`. Each document has a `kind`; on an error the command prints a
-`softpractice.error` document.
+`softpractice.error` document, also for an invalid command line (code
+`usage`) and for a declined `submit` confirmation (code `declined`).
 
 ```bash
 softpractice result --wait --timeout 10m --json

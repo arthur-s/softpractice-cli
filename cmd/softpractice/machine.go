@@ -61,6 +61,14 @@ type nextAction struct {
 // important first. The list is never empty.
 func nextActions(ctx context.Context, snapshot statusSnapshot) []nextAction {
 	link, workspace, repository := snapshot.Link, snapshot.Workspace, snapshot.Repository
+	switch workspace.Workspace.State {
+	case "active":
+	case "completed":
+		// The practicum is finished: nothing is left to submit or update.
+		return []nextAction{{Code: "practicum_completed", URL: webPracticumCompletionURL(ctx, link.ProjectID)}}
+	default:
+		return []nextAction{{Code: "workspace_inactive"}}
+	}
 	var actions []nextAction
 	submit := nextAction{Code: "submit", Command: "softpractice submit --wait"}
 	if !repository.Clean {
@@ -69,11 +77,24 @@ func nextActions(ctx context.Context, snapshot statusSnapshot) []nextAction {
 	latest := workspace.LatestSubmission
 	switch {
 	case pendingTransition(link, workspace):
+		if !repository.Clean {
+			// update refuses a dirty tree, and committing the changes would
+			// turn the accepted tree into a continued project it does not
+			// overlay.
+			actions = append(actions, nextAction{Code: "stash_changes", Command: "git stash"})
+		}
 		actions = append(actions, nextAction{Code: "apply_update", Command: "softpractice update"})
 	case latest == nil:
 		actions = append(actions, submit)
 	case latest.JobState == "queued" || latest.JobState == "leased":
 		actions = append(actions, nextAction{Code: "wait_result", Command: "softpractice result --wait"})
+	case latest.JobState == "superseded":
+		// This evaluation will have no result, and submitting the same commit
+		// again replays this submission: only a new commit is evaluated.
+		if repository.Clean {
+			submit.Code = "resubmit"
+		}
+		actions = append(actions, submit)
 	default:
 		result := snapshot.Latest
 		readResult := nextAction{Code: "read_result", Command: "softpractice result"}
@@ -84,6 +105,11 @@ func nextActions(ctx context.Context, snapshot statusSnapshot) []nextAction {
 		case !repository.Clean || (result != nil && result.CommitSHA != "" && result.CommitSHA != repository.CommitSHA):
 			// Work continued after this submission.
 			actions = append(actions, submit)
+		case result != nil && result.Status == "technical_failure":
+			// The same revision can be evaluated again only from the result
+			// page; submitting the same commit replays this submission.
+			actions = append(actions,
+				nextAction{Code: "retry_evaluation", URL: webResultURL(ctx, latest.ID)}, readResult)
 		default:
 			actions = append(actions, readResult)
 		}
@@ -96,6 +122,14 @@ func nextActions(ctx context.Context, snapshot statusSnapshot) []nextAction {
 
 func nextActionText(ctx context.Context, action nextAction) string {
 	switch action.Code {
+	case "practicum_completed":
+		return text(ctx, "практикум пройден: ", "the practicum is completed: ") + action.URL
+	case "workspace_inactive":
+		return text(ctx, "workspace не активен и не принимает отправки",
+			"the workspace is not active and accepts no submissions")
+	case "stash_changes":
+		return text(ctx, "уберите незакоммиченные изменения, например `git stash`: `softpractice update` применяет переход только к чистому принятому решению",
+			"set uncommitted changes aside, for example with `git stash`: `softpractice update` applies the transition only to the clean accepted solution")
 	case "apply_update":
 		return text(ctx, "примените переход к следующему уроку: `softpractice update`",
 			"apply the transition to the next lesson: `softpractice update`")
@@ -105,6 +139,9 @@ func nextActionText(ctx context.Context, action nextAction) string {
 	case "submit":
 		return text(ctx, "когда решение готово и закоммичено, отправьте его: `softpractice submit --wait`",
 			"when the solution is committed, submit it: `softpractice submit --wait`")
+	case "resubmit":
+		return text(ctx, "проверка последней отправки заменена, результата у неё не будет; сделайте новый commit и отправьте его: `softpractice submit --wait`",
+			"the evaluation of the latest submission was superseded and will have no result; make a new commit and submit it: `softpractice submit --wait`")
 	case "wait_result":
 		return text(ctx, "дождитесь результата проверки: `softpractice result --wait`",
 			"wait for the evaluation: `softpractice result --wait`")
@@ -114,6 +151,9 @@ func nextActionText(ctx context.Context, action nextAction) string {
 	case "answer_questions":
 		return text(ctx, "ответьте на вопросы рецензента на странице результата: ",
 			"answer the reviewer's questions on the result page: ") + action.URL
+	case "retry_evaluation":
+		return text(ctx, "проверка не завершилась из-за технической ошибки; повторите её на странице результата: ",
+			"the evaluation failed for a technical reason; retry it on the result page: ") + action.URL
 	case "update_lesson_version":
 		return text(ctx, "можно перейти на новую версию урока: `softpractice update`",
 			"you can move to the new lesson version: `softpractice update`")
@@ -196,40 +236,12 @@ type evaluationAPIResponse struct {
 	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
+// evaluationProjection is the part of a terminal evaluation that
+// normalizeSubmissionResponse validates; `result` renders the rest.
 type evaluationProjection struct {
 	SchemaVersion int    `json:"schema_version"`
 	ExerciseID    string `json:"exercise_id"`
 	Status        string `json:"status"`
-	Deterministic *struct {
-		Status string `json:"status"`
-	} `json:"deterministic"`
-	Review *struct {
-		Status        string  `json:"status"`
-		Mode          string  `json:"mode"`
-		Authoritative bool    `json:"authoritative"`
-		Verdict       *string `json:"verdict"`
-	} `json:"review"`
-	TechnicalError *struct {
-		ErrorCode string `json:"error_code"`
-		Stage     string `json:"stage"`
-		SupportID string `json:"support_id"`
-	} `json:"technical_error"`
-}
-
-type machineEvaluation struct {
-	SchemaVersion       int                    `json:"schema_version"`
-	ExerciseID          string                 `json:"exercise_id"`
-	Status              string                 `json:"status"`
-	DeterministicStatus string                 `json:"deterministic_status,omitempty"`
-	Review              *machineReview         `json:"review,omitempty"`
-	TechnicalError      *machineTechnicalError `json:"technical_error,omitempty"`
-}
-
-type machineReview struct {
-	Status        string  `json:"status"`
-	Mode          string  `json:"mode"`
-	Authoritative bool    `json:"authoritative"`
-	Verdict       *string `json:"verdict"`
 }
 
 type machineTechnicalError struct {
@@ -239,15 +251,14 @@ type machineTechnicalError struct {
 }
 
 type machineSubmission struct {
-	SubmissionID    string             `json:"submission_id"`
-	EvaluationJobID string             `json:"evaluation_job_id"`
-	JobState        string             `json:"job_state"`
-	Terminal        bool               `json:"terminal"`
-	Attempt         int                `json:"attempt"`
-	MaxAttempts     int                `json:"max_attempts"`
-	NextPollSeconds int                `json:"next_poll_seconds,omitempty"`
-	UpdatedAt       time.Time          `json:"updated_at"`
-	Evaluation      *machineEvaluation `json:"evaluation,omitempty"`
+	SubmissionID    string    `json:"submission_id"`
+	EvaluationJobID string    `json:"evaluation_job_id"`
+	JobState        string    `json:"job_state"`
+	Terminal        bool      `json:"terminal"`
+	Attempt         int       `json:"attempt"`
+	MaxAttempts     int       `json:"max_attempts"`
+	NextPollSeconds int       `json:"next_poll_seconds,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func downloadSubmissionRevision(
@@ -269,15 +280,14 @@ func downloadSubmissionRevision(
 			"usage: softpractice submissions download --id ID [--output PATH]")
 	}
 	submissionID := strings.TrimSpace(*id)
-	parsedID, err := uuid.Parse(submissionID)
-	if err != nil || parsedID.String() != submissionID {
-		return errors.New(text(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID"))
+	if validateSubmissionID(submissionID) != nil {
+		return usage(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID")
 	}
 	target := strings.TrimSpace(*destination)
 	if target == "" {
 		target = "softpractice-" + submissionID + ".zip"
 	}
-	target, err = filepath.Abs(target)
+	target, err := filepath.Abs(target)
 	if err != nil {
 		return err
 	}
@@ -359,27 +369,5 @@ func normalizeSubmissionResponse(response evaluationAPIResponse) (machineSubmiss
 		(response.JobState == "failed") != (evaluation.Status == "technical_failure") {
 		return machineSubmission{}, errors.New("evaluation projection status is inconsistent")
 	}
-	machine := machineEvaluation{
-		SchemaVersion: evaluation.SchemaVersion,
-		ExerciseID:    evaluation.ExerciseID,
-		Status:        evaluation.Status,
-	}
-	if evaluation.Deterministic != nil {
-		machine.DeterministicStatus = evaluation.Deterministic.Status
-	}
-	if evaluation.Review != nil {
-		machine.Review = &machineReview{
-			Status: evaluation.Review.Status, Mode: evaluation.Review.Mode,
-			Authoritative: evaluation.Review.Authoritative, Verdict: evaluation.Review.Verdict,
-		}
-	}
-	if evaluation.TechnicalError != nil {
-		machine.TechnicalError = &machineTechnicalError{
-			ErrorCode: evaluation.TechnicalError.ErrorCode,
-			Stage:     evaluation.TechnicalError.Stage,
-			SupportID: evaluation.TechnicalError.SupportID,
-		}
-	}
-	payload.Evaluation = &machine
 	return payload, nil
 }

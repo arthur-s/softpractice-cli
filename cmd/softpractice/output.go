@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/arthur-s/softpractice-cli/internal/learnercli"
 )
@@ -34,6 +36,12 @@ type usageError struct{ message string }
 
 func (e usageError) Error() string { return e.message }
 
+// errSubmissionDeclined is the learner's "no" to the submit confirmation:
+// nothing was sent, so the command does not report success.
+type errSubmissionDeclined struct{ message string }
+
+func (e errSubmissionDeclined) Error() string { return e.message }
+
 func usage(ctx context.Context, russian, english string) error {
 	return usageError{message: text(ctx, russian, english)}
 }
@@ -48,6 +56,30 @@ func parseFlags(flags *flag.FlagSet, args []string) error {
 		return usageError{message: err.Error()}
 	}
 	return nil
+}
+
+// requestsJSON reports whether args ask for --json. It reads the raw
+// arguments, so a command line that fails to parse is still reported as a
+// softpractice.error document when it asked for JSON.
+func requestsJSON(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if name != "json" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		enabled, err := strconv.ParseBool(value)
+		return err == nil && enabled
+	}
+	return false
 }
 
 func jsonFlag(flags *flag.FlagSet) *bool {
@@ -81,9 +113,12 @@ type machineError struct {
 func errorCode(err error) string {
 	var statusError *learnercli.HTTPError
 	var usageErr usageError
+	var declined errSubmissionDeclined
 	switch {
 	case errors.As(err, &usageErr):
 		return "usage"
+	case errors.As(err, &declined):
+		return "declined"
 	case errors.Is(err, learnercli.ErrLoginRequired):
 		return "login_required"
 	case errors.As(err, &statusError) && statusError.Status == http.StatusUnauthorized:

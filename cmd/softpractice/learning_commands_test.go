@@ -289,6 +289,81 @@ func TestEvaluationWaitsOutRateLimit(t *testing.T) {
 	}
 }
 
+func TestEvaluationRateLimitWithoutAnAnswer(t *testing.T) {
+	rateLimited := func(retryAfter string) func(http.ResponseWriter) {
+		return func(writer http.ResponseWriter) {
+			if retryAfter != "" {
+				writer.Header().Set("Retry-After", retryAfter)
+			}
+			writeTestAPIError(writer, http.StatusTooManyRequests, "rate_limited")
+		}
+	}
+	for name, tc := range map[string]struct {
+		retryAfter string
+		timeout    string
+		calls      int
+	}{
+		// Without Retry-After there is no interval to honour, so it is not
+		// retried at all.
+		"no Retry-After": {retryAfter: "", timeout: "1m", calls: 1},
+		// A rate limit before the first answer leaves no pending state to
+		// report when the next allowed poll falls after the timeout.
+		"past the timeout": {retryAfter: "90", timeout: "1m", calls: 1},
+	} {
+		server, calls := evaluationServer(t, currentSubmissionID, rateLimited(tc.retryAfter))
+		clock := &fakeClock{now: time.Unix(0, 0)}
+		output, _, err := runEvaluation(t, clock.useCases(savedTestClient(t, server.URL), ""),
+			"--id", currentSubmissionID, "--wait", "--timeout", tc.timeout, "--json")
+		var statusError *learnercli.HTTPError
+		if !errors.As(err, &statusError) || statusError.Status != http.StatusTooManyRequests ||
+			*calls != tc.calls || len(clock.sleeps) != 0 || !strings.Contains(output, `"code": "api_error"`) {
+			t.Fatalf("%s: err = %v, calls = %d, sleeps = %v, output:\n%s", name, err, *calls, clock.sleeps, output)
+		}
+	}
+}
+
+func TestEvaluationWaitStopsWhenCancelled(t *testing.T) {
+	server, calls := evaluationServer(t, currentSubmissionID, respondPending("5"))
+	useCases := newLearnerUseCases(savedTestClient(t, server.URL), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	useCases.sleep = func(sleepCtx context.Context, delay time.Duration) error {
+		cancel()
+		return sleepContext(sleepCtx, delay)
+	}
+	_, err := useCases.Evaluation(ctx, currentSubmissionID, evaluationWait{Wait: true, Timeout: time.Hour})
+	if !errors.Is(err, context.Canceled) || *calls != 1 || errorCode(err) != "cancelled" {
+		t.Fatalf("err = %v, calls = %d", err, *calls)
+	}
+}
+
+func TestEvaluationPollRefreshesAnExpiredAccessToken(t *testing.T) {
+	refreshes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/v1/auth/tokens/refresh":
+			refreshes++
+			writeTestJSON(writer, map[string]any{
+				"token_type": "Bearer", "access_token": "new-access-token", "expires_in_seconds": 900,
+				"refresh_token": "new-refresh-token", "refresh_idle_expires_at": time.Now().Add(time.Hour),
+				"refresh_absolute_expires_at": time.Now().Add(2 * time.Hour), "scopes": []string{"workspace:read"},
+			})
+		case request.Header.Get("Authorization") != "Bearer new-access-token":
+			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+		default:
+			respondPending("3")(writer)
+		}
+	}))
+	defer server.Close()
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	output, _, err := runEvaluation(t, clock.useCases(savedTestClient(t, server.URL), ""),
+		"--id", currentSubmissionID, "--json")
+	var payload machineEvaluationResult
+	if !errors.Is(err, exitNotReady) || refreshes != 1 || decodeTestJSON([]byte(output), &payload) != nil ||
+		payload.Outcome != evaluationPending {
+		t.Fatalf("err = %v, refreshes = %d, output:\n%s", err, refreshes, output)
+	}
+}
+
 func TestEvaluationSupersededIsASeparateOutcome(t *testing.T) {
 	server, _ := evaluationServer(t, currentSubmissionID, func(writer http.ResponseWriter) {
 		writeTestAPIError(writer, http.StatusConflict, "evaluation_superseded")
@@ -539,6 +614,52 @@ func TestInvalidArgumentsAreUsageErrors(t *testing.T) {
 			t.Fatalf("%s: err = %v, want a usage error", name, err)
 		}
 	}
+	for _, args := range [][]string{{"--id", "not-a-uuid"}, {"--id", strings.ToUpper(currentSubmissionID)}} {
+		if _, _, err := runEvaluation(t, useCases, args...); !errors.As(err, new(usageError)) {
+			t.Fatalf("%v: err = %v, want a usage error", args, err)
+		}
+	}
+
+	// With --json even a command line that does not parse is reported as
+	// one softpractice.error document on stdout.
+	commands := map[string]func(context.Context, learnerUseCases, []string, io.Writer, io.Writer) error{
+		"result": resultCommand, "task": taskCommand, "material": materialCommand,
+		"hint": hintCommand, "submissions": submissionsCommand,
+	}
+	for name, command := range commands {
+		for _, args := range [][]string{{"--json", "--no-such-flag"}, {"--json", "extra"}, {"--no-such-flag", "--json=true"}} {
+			var output bytes.Buffer
+			err := command(context.Background(), useCases, args, &output, io.Discard)
+			var payload machineError
+			if decodeErr := decodeTestJSON(output.Bytes(), &payload); decodeErr != nil || !errors.As(err, new(usageError)) ||
+				payload.Kind != "softpractice.error" || payload.Error.Code != "usage" {
+				t.Fatalf("%s %v: err = %v, output:\n%s", name, args, err, output.String())
+			}
+		}
+	}
+	client := savedTestClient(t, "http://127.0.0.1:1")
+	for name, command := range map[string]func(io.Writer) error{
+		"status": func(output io.Writer) error {
+			return status(context.Background(), client, t.TempDir(), []string{"--json", "extra"}, output, io.Discard)
+		},
+		"submit": func(output io.Writer) error {
+			return submit(context.Background(), client, t.TempDir(), []string{"--json", "--timeout", "-1s"},
+				strings.NewReader(""), output, io.Discard)
+		},
+	} {
+		var output bytes.Buffer
+		err := command(&output)
+		if !errors.As(err, new(usageError)) || !strings.Contains(output.String(), `"code": "usage"`) {
+			t.Fatalf("%s: err = %v, output:\n%s", name, err, output.String())
+		}
+	}
+
+	// Without --json, or with --json=false, stdout stays empty.
+	var output bytes.Buffer
+	if err := taskCommand(context.Background(), useCases, []string{"--json=false", "extra"}, &output, io.Discard); err == nil ||
+		output.Len() != 0 {
+		t.Fatalf("err = %v, output:\n%s", err, output.String())
+	}
 }
 
 // jsonKeyPaths lists every object key path in a JSON document, with array
@@ -727,7 +848,8 @@ func TestNextActions(t *testing.T) {
 	}
 	snapshot := func(pinned string, pinnedVersion int, clean bool, head string) statusSnapshot {
 		var result statusSnapshot
-		result.Link = learnercli.ProjectLink{SchemaVersion: 2, AssignmentID: pinned, AssignmentVersion: pinnedVersion}
+		result.Link = learnercli.ProjectLink{SchemaVersion: 2, ProjectID: "pa-foundation", AssignmentID: pinned, AssignmentVersion: pinnedVersion}
+		result.Workspace.Workspace.State = "active"
 		result.Workspace.Assignment.ID = "pa-foundation-02"
 		result.Workspace.Assignment.Version = 2
 		result.Repository = gitRepository{Clean: clean, CommitSHA: head}
@@ -755,26 +877,68 @@ func TestNextActions(t *testing.T) {
 	reworked := reviewed
 	reworked.Repository.CommitSHA = "def"
 	olderVersion := snapshot("pa-foundation-02", 1, true, "abc")
+	dirtyTransition := snapshot("pa-foundation-01", 1, false, "abc")
+	dirtyReviewed := reviewed
+	dirtyReviewed.Repository.Clean = false
+	unreadable := snapshot("pa-foundation-02", 2, true, "abc")
+	unreadable.Workspace.LatestSubmission = submission("completed")
+	superseded := snapshot("pa-foundation-02", 2, true, "abc")
+	superseded.Workspace.LatestSubmission = submission("superseded")
+	dirtySuperseded := superseded
+	dirtySuperseded.Repository.Clean = false
+	technical := snapshot("pa-foundation-02", 2, true, "abc")
+	technical.Workspace.LatestSubmission = submission("failed")
+	technical.Latest = &latestResult{Status: "technical_failure", CommitSHA: "abc"}
+	technicalReworked := technical
+	technicalReworked.Repository.CommitSHA = "def"
+	completed := reviewed
+	completed.Workspace.Workspace.State = "completed"
+	completed.Workspace.Assignment.State = "accepted"
+	completed.Latest = &latestResult{Status: "accepted", CommitSHA: "abc"}
+	completedReworked := completed
+	completedReworked.Repository = gitRepository{Clean: false, CommitSHA: "def"}
+	archived := fresh
+	archived.Workspace.Workspace.State = "archived"
 
 	for name, tc := range map[string]struct {
 		snapshot statusSnapshot
 		want     string
 	}{
-		"transition":    {transition, "apply_update"},
-		"no submission": {fresh, "submit"},
-		"dirty tree":    {dirty, "commit_changes"},
-		"evaluating":    {queued, "wait_result"},
-		"questions":     {questions, "answer_questions,read_result"},
-		"reviewed":      {reviewed, "read_result"},
-		"new commit":    {reworked, "submit"},
-		"older version": {olderVersion, "submit,update_lesson_version"},
+		"transition":                {transition, "apply_update"},
+		"no submission":             {fresh, "submit"},
+		"dirty tree":                {dirty, "commit_changes"},
+		"evaluating":                {queued, "wait_result"},
+		"questions":                 {questions, "answer_questions,read_result"},
+		"reviewed":                  {reviewed, "read_result"},
+		"new commit":                {reworked, "submit"},
+		"older version":             {olderVersion, "submit,update_lesson_version"},
+		"dirty transition":          {dirtyTransition, "stash_changes,apply_update"},
+		"dirty after review":        {dirtyReviewed, "commit_changes"},
+		"result unreadable":         {unreadable, "read_result"},
+		"superseded":                {superseded, "resubmit"},
+		"superseded, dirty":         {dirtySuperseded, "commit_changes"},
+		"technical failure":         {technical, "retry_evaluation,read_result"},
+		"technical failure, rework": {technicalReworked, "submit"},
+		"practicum completed":       {completed, "practicum_completed"},
+		"completed, rework":         {completedReworked, "practicum_completed"},
+		"archived":                  {archived, "workspace_inactive"},
 	} {
 		actions := nextActions(ctx, tc.snapshot)
 		if got := codes(actions); got != tc.want {
 			t.Fatalf("%s: next actions = %s, want %s", name, got, tc.want)
 		}
-		if name == "questions" && actions[0].URL != "https://softpractice.example/submissions/"+currentSubmissionID+"/result" {
-			t.Fatalf("questions URL = %q", actions[0].URL)
+		if (name == "questions" || name == "technical failure") &&
+			actions[0].URL != "https://softpractice.example/submissions/"+currentSubmissionID+"/result" {
+			t.Fatalf("%s: URL = %q", name, actions[0].URL)
+		}
+		if name == "practicum completed" && actions[0].URL != "https://softpractice.example/practicums/"+
+			tc.snapshot.Link.ProjectID+"/completion" {
+			t.Fatalf("completion URL = %q", actions[0].URL)
+		}
+		for _, action := range actions {
+			if nextActionText(ctx, action) == action.Code {
+				t.Fatalf("%s: action %s has no text", name, action.Code)
+			}
 		}
 	}
 }

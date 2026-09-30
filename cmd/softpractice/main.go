@@ -1390,7 +1390,8 @@ func status(
 	startDirectory string,
 	args []string,
 	output, errorOutput io.Writer,
-) error {
+) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	jsonOutput := jsonFlag(flags)
@@ -1402,7 +1403,7 @@ func status(
 	}
 	snapshot, err := newLearnerUseCases(client, startDirectory).Status(ctx)
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	if *jsonOutput {
 		return writeStatusJSON(ctx, output, snapshot)
@@ -1504,21 +1505,23 @@ func submit(
 	args []string,
 	input io.Reader,
 	output, errorOutput io.Writer,
-) error {
+) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	flags := flag.NewFlagSet("submit", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	yes := flags.Bool("yes", false, "submit without an interactive confirmation")
 	checksFlag := flags.Bool("checks", false, "run local public checks before submitting")
 	wait := flags.Bool("wait", false, "wait for the evaluation result after submitting")
 	timeout := flags.Duration("timeout", defaultEvaluationTimeout, "maximum wait with --wait")
+	directions := flags.Bool("directions", false, "with --wait, also print the reviewer's directions and next steps")
 	jsonOutput := jsonFlag(flags)
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *timeout < 0 {
 		return usage(ctx,
-			"использование: softpractice submit [--yes] [--checks=true|false] [--wait] [--timeout DURATION] [--json]",
-			"usage: softpractice submit [--yes] [--checks=true|false] [--wait] [--timeout DURATION] [--json]")
+			"использование: softpractice submit [--yes] [--checks=true|false] [--wait] [--timeout DURATION] [--directions] [--json]",
+			"usage: softpractice submit [--yes] [--checks=true|false] [--wait] [--timeout DURATION] [--directions] [--json]")
 	}
 	// With --json, stdout carries only the JSON document; everything meant
 	// for a person goes to stderr.
@@ -1529,7 +1532,7 @@ func submit(
 	useCases := newLearnerUseCases(client, startDirectory)
 	prepared, err := useCases.PrepareSubmission(ctx)
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	defer prepared.Close()
 	repository, link, workspace := prepared.Repository, prepared.Link, prepared.Workspace
@@ -1560,12 +1563,12 @@ func submit(
 	if !explicit {
 		enabled, err = projectAutoChecks(ctx, repository.Root)
 		if err != nil {
-			return reportJSONError(*jsonOutput, output, err)
+			return err
 		}
 	}
 	if enabled {
 		if err := runSubmissionChecks(ctx, repository, human, errorOutput); err != nil {
-			return reportJSONError(*jsonOutput, output, err)
+			return err
 		}
 	} else {
 		fmt.Fprintln(human, text(ctx, "Локальные проверки не запускались. Решение проверит сервер. Для отдельного локального запуска: softpractice check.", "Local checks were not run. The server will check your solution. To run them separately: softpractice check."))
@@ -1573,16 +1576,15 @@ func submit(
 	if !*yes {
 		confirmed, err := confirmSubmission(ctx, input, human)
 		if err != nil {
-			return reportJSONError(*jsonOutput, output, err)
+			return err
 		}
 		if !confirmed {
-			fmt.Fprintln(human, text(ctx, "Отправка отменена.", "Submission cancelled."))
-			return nil
+			return errSubmissionDeclined{message: text(ctx, "отправка отменена", "submission cancelled")}
 		}
 	}
 	receipt, err := useCases.SendSubmission(ctx, prepared)
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	replay := ""
 	if receipt.Replayed {
@@ -1618,8 +1620,8 @@ func submit(
 		return nil
 	}
 	fmt.Fprintln(human, text(ctx, "Ждём результат проверки…\n", "Waiting for the evaluation…\n"))
-	return reportJSONError(*jsonOutput, output, printEvaluation(ctx, useCases, receipt.SubmissionID,
-		evaluationWait{Wait: true, Timeout: *timeout}, false, *jsonOutput, output))
+	return printEvaluation(ctx, useCases, receipt.SubmissionID,
+		evaluationWait{Wait: true, Timeout: *timeout}, *directions, *jsonOutput, output)
 }
 
 // machineSubmissionReceipt is what `submit --json` prints without --wait.
@@ -1706,6 +1708,13 @@ func openCurrent(
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
+	// The page may also follow the flags: flag parsing stops at it.
+	if page == "" && flags.NArg() > 0 {
+		page = flags.Arg(0)
+		if err := parseFlags(flags, flags.Args()[1:]); err != nil {
+			return err
+		}
+	}
 	if flags.NArg() != 0 || (page != "" && page != "task" && page != "material" && page != "result") {
 		return usageErr
 	}
@@ -1735,10 +1744,20 @@ func openCurrent(
 	case "material":
 		target = webLessonURL(ctx, workspace.Assignment.ID, version, "/material")
 	case "result":
-		if workspace.LatestSubmission == nil {
+		// Like `softpractice result`: right after an acceptance, the accepted
+		// result of the previous lesson.
+		if workspace.LatestSubmission != nil {
+			target = webResultURL(ctx, workspace.LatestSubmission.ID)
+			break
+		}
+		_, submissionID, found, err := client.LatestPracticumSubmission(ctx, link.ProjectID)
+		if err != nil {
+			return err
+		}
+		if !found {
 			return fmt.Errorf(text(ctx, "по уроку %s отправок пока нет", "lesson %s has no submissions yet"), workspace.Assignment.ID)
 		}
-		target = webResultURL(ctx, workspace.LatestSubmission.ID)
+		target = webResultURL(ctx, submissionID)
 	}
 	fmt.Fprintln(output, target)
 	if *noBrowser {

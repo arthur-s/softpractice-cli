@@ -65,7 +65,8 @@ func resultCommand(
 	useCases learnerUseCases,
 	args []string,
 	output, errorOutput io.Writer,
-) error {
+) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	flags := flag.NewFlagSet("result", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	id := flags.String("id", "", "submission ID; defaults to the latest submission")
@@ -82,10 +83,13 @@ func resultCommand(
 			"usage: softpractice result [--id ID] [--wait] [--timeout DURATION] [--directions] [--json]")
 	}
 	submissionID := strings.TrimSpace(*id)
+	if submissionID != "" && validateSubmissionID(submissionID) != nil {
+		return usage(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID")
+	}
 	if submissionID == "" {
 		latest, err := useCases.LatestSubmission(ctx)
 		if err != nil {
-			return reportJSONError(*jsonOutput, output, err)
+			return err
 		}
 		if latest.PredecessorAssignmentID != "" {
 			fmt.Fprintf(errorOutput, text(ctx,
@@ -95,9 +99,8 @@ func resultCommand(
 		}
 		submissionID = latest.SubmissionID
 	}
-	return reportJSONError(*jsonOutput, output,
-		printEvaluation(ctx, useCases, submissionID, evaluationWait{Wait: *wait, Timeout: *timeout},
-			*directions, *jsonOutput, output))
+	return printEvaluation(ctx, useCases, submissionID, evaluationWait{Wait: *wait, Timeout: *timeout},
+		*directions, *jsonOutput, output)
 }
 
 // printEvaluation reads or waits for one evaluation, prints it, and returns
@@ -313,6 +316,10 @@ func webLessonURL(ctx context.Context, assignmentID string, version int, suffix 
 	return target
 }
 
+func webPracticumCompletionURL(ctx context.Context, practicumID string) string {
+	return strings.TrimRight(settingsFromContext(ctx).WebURL, "/") + "/practicums/" + practicumID + "/completion"
+}
+
 func webResultURL(ctx context.Context, submissionID string) string {
 	return strings.TrimRight(settingsFromContext(ctx).WebURL, "/") + "/submissions/" + submissionID + "/result"
 }
@@ -327,7 +334,8 @@ type machineTask struct {
 	LessonVersionUpdate *machineLessonVersionUpdate `json:"lesson_version_update,omitempty"`
 }
 
-func taskCommand(ctx context.Context, useCases learnerUseCases, args []string, output, errorOutput io.Writer) error {
+func taskCommand(ctx context.Context, useCases learnerUseCases, args []string, output, errorOutput io.Writer) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	flags := flag.NewFlagSet("task", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	jsonOutput := jsonFlag(flags)
@@ -339,7 +347,7 @@ func taskCommand(ctx context.Context, useCases learnerUseCases, args []string, o
 	}
 	lesson, assignment, err := useCases.Task(ctx)
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	payload := machineTask{
 		Kind: "softpractice.task", WorkspaceID: lesson.Workspace.Workspace.ID, ProjectID: lesson.Link.ProjectID,
@@ -389,7 +397,8 @@ type machineMaterial struct {
 	URL          string          `json:"url"`
 }
 
-func materialCommand(ctx context.Context, useCases learnerUseCases, args []string, output, errorOutput io.Writer) error {
+func materialCommand(ctx context.Context, useCases learnerUseCases, args []string, output, errorOutput io.Writer) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	flags := flag.NewFlagSet("material", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	lessonID := flags.String("lesson", "", "lesson ID; defaults to the lesson of this project")
@@ -403,7 +412,7 @@ func materialCommand(ctx context.Context, useCases learnerUseCases, args []strin
 	}
 	snapshot, err := useCases.Material(ctx, strings.TrimSpace(*lessonID))
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	payload := machineMaterial{
 		Kind: "softpractice.material", AssignmentID: snapshot.AssignmentID, Version: snapshot.Version,
@@ -442,7 +451,8 @@ type machineHints struct {
 	URL string `json:"url"`
 }
 
-func hintCommand(ctx context.Context, useCases learnerUseCases, args []string, output, errorOutput io.Writer) error {
+func hintCommand(ctx context.Context, useCases learnerUseCases, args []string, output, errorOutput io.Writer) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	flags := flag.NewFlagSet("hint", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	jsonOutput := jsonFlag(flags)
@@ -454,7 +464,7 @@ func hintCommand(ctx context.Context, useCases learnerUseCases, args []string, o
 	}
 	snapshot, err := useCases.Hints(ctx)
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	payload := machineHints{
 		Kind: "softpractice.hints", AssignmentID: snapshot.Lesson.AssignmentID, Version: snapshot.Lesson.Version,
@@ -498,7 +508,8 @@ func submissionsCommand(
 	useCases learnerUseCases,
 	args []string,
 	output, errorOutput io.Writer,
-) error {
+) (err error) {
+	defer func() { err = reportJSONError(requestsJSON(args), output, err) }()
 	if len(args) > 0 && args[0] == "download" {
 		return downloadSubmissionRevision(ctx, useCases.client, args[1:], output, errorOutput)
 	}
@@ -515,7 +526,7 @@ func submissionsCommand(
 	}
 	snapshot, err := useCases.Submissions(ctx)
 	if err != nil {
-		return reportJSONError(*jsonOutput, output, err)
+		return err
 	}
 	payload := machineSubmissions{
 		Kind: "softpractice.submissions", AssignmentID: snapshot.Lesson.AssignmentID,

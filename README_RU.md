@@ -127,7 +127,8 @@ softpractice set auto-checks true
 
 `status`, `task`, `material`, `hint`, `result`, `submissions` и `submit`
 принимают `--json`. У каждого документа есть поле `kind`; при ошибке команда
-выводит документ `softpractice.error`.
+выводит документ `softpractice.error`, в том числе при неверных аргументах
+(код `usage`) и при отказе в подтверждении `submit` (код `declined`).
 
 ```bash
 softpractice result --wait --timeout 10m --json
