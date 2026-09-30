@@ -323,39 +323,55 @@ func (s *mcpServer) check(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoIn
 		}
 		payload.Failure = err.Error()
 	}
-	payload.Output, payload.Truncated = tailString(combined.String(), mcpMaxCheckOutput)
+	payload.Output, payload.Truncated = combined.snapshot()
 	return nil, payload, nil
 }
 
-func tailString(value string, limit int) (string, bool) {
-	if len(value) <= limit {
-		return value, false
-	}
-	cut := value[len(value)-limit:]
-	// Do not start in the middle of a UTF-8 sequence.
-	for len(cut) > 0 && cut[0]&0xC0 == 0x80 {
-		cut = cut[1:]
-	}
-	return cut, true
-}
-
-// lockedBuffer collects the stdout and stderr of checks, which may be written
-// concurrently.
+// lockedBuffer retains only the tail of stdout and stderr, which checks may
+// write concurrently. Memory stays bounded even while the process is running.
 type lockedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
+	mu        sync.Mutex
+	buffer    []byte
+	truncated bool
 }
 
 func (b *lockedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buffer.Write(data)
+	n := len(data)
+	if b.buffer == nil {
+		b.buffer = make([]byte, 0, mcpMaxCheckOutput)
+	}
+	if len(b.buffer)+n > mcpMaxCheckOutput {
+		b.truncated = true
+		if n >= mcpMaxCheckOutput {
+			b.buffer = append(b.buffer[:0], data[n-mcpMaxCheckOutput:]...)
+			return n, nil
+		}
+		keep := mcpMaxCheckOutput - n
+		copy(b.buffer, b.buffer[len(b.buffer)-keep:])
+		b.buffer = b.buffer[:keep]
+	}
+	b.buffer = append(b.buffer, data...)
+	return n, nil
+}
+
+func (b *lockedBuffer) snapshot() (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := b.buffer
+	if b.truncated {
+		// Do not start in the middle of a UTF-8 sequence.
+		for len(data) > 0 && data[0]&0xC0 == 0x80 {
+			data = data[1:]
+		}
+	}
+	return string(data), b.truncated
 }
 
 func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.String()
+	value, _ := b.snapshot()
+	return value
 }
 
 type mcpWaitInput struct {

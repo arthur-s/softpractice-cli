@@ -258,6 +258,11 @@ func (c *Client) Submit(
 }
 
 func (c *Client) SaveCredentials(credentials Credentials) error {
+	unlock, err := c.Store.lock(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if credentials.APIURL != c.BaseURL {
 		return errors.New("credentials belong to a different API URL")
 	}
@@ -269,6 +274,11 @@ func (c *Client) SaveCredentials(credentials Credentials) error {
 }
 
 func (c *Client) Logout(ctx context.Context) error {
+	unlock, err := c.Store.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	credentials, err := c.Store.Load()
 	if err != nil {
 		return err
@@ -295,38 +305,43 @@ func (c *Client) Logout(ctx context.Context) error {
 }
 
 func (c *Client) validCredentials(ctx context.Context) (Credentials, error) {
-	c.credentialsMu.Lock()
-	var credentials Credentials
-	if c.credentials != nil {
-		credentials = *c.credentials
+	return c.authorizedCredentials(ctx, "")
+}
+
+func (c *Client) refresh(ctx context.Context, rejected Credentials) (Credentials, error) {
+	return c.authorizedCredentials(ctx, rejected.AccessToken)
+}
+
+// Serialize rotation across MCP calls and CLI processes sharing this store.
+// Reload the refresh credential under the lock: another process may have
+// rotated it, signed in, or signed out since the last request.
+func (c *Client) authorizedCredentials(ctx context.Context, rejectedAccessToken string) (Credentials, error) {
+	unlock, err := c.Store.lock(ctx)
+	if err != nil {
+		return Credentials{}, err
 	}
-	c.credentialsMu.Unlock()
-	if credentials.RefreshToken == "" {
-		loaded, err := c.Store.Load()
-		if err != nil {
-			return Credentials{}, err
-		}
-		credentials = loaded
+	defer unlock()
+	credentials, err := c.Store.Load()
+	if err != nil {
+		return Credentials{}, err
 	}
 	if credentials.APIURL != c.BaseURL {
 		return Credentials{}, loginRequired("stored credentials belong to a different API URL; login again")
 	}
-	if time.Now().Add(30 * time.Second).Before(credentials.AccessExpiresAt) {
+	c.credentialsMu.Lock()
+	if cached := c.credentials; cached != nil && cached.APIURL == credentials.APIURL &&
+		cached.RefreshToken == credentials.RefreshToken {
+		credentials = *cached
+	}
+	c.credentialsMu.Unlock()
+	if time.Now().Add(30*time.Second).Before(credentials.AccessExpiresAt) &&
+		credentials.AccessToken != rejectedAccessToken {
 		return credentials, nil
 	}
 	now := time.Now()
-	if !credentials.RefreshIdleExpiresAt.IsZero() &&
-		!now.Before(credentials.RefreshIdleExpiresAt) {
+	if !now.Before(credentials.RefreshIdleExpiresAt) || !now.Before(credentials.RefreshAbsoluteExpiresAt) {
 		return Credentials{}, loginRequired("CLI login expired; run `softpractice login`")
 	}
-	if !credentials.RefreshAbsoluteExpiresAt.IsZero() &&
-		!now.Before(credentials.RefreshAbsoluteExpiresAt) {
-		return Credentials{}, loginRequired("CLI login expired; run `softpractice login`")
-	}
-	return c.refresh(ctx, credentials)
-}
-
-func (c *Client) refresh(ctx context.Context, credentials Credentials) (Credentials, error) {
 	var tokens tokenSet
 	if err := c.jsonRequest(ctx, http.MethodPost, "/v1/auth/tokens/refresh", "", map[string]string{
 		"refresh_token": credentials.RefreshToken,

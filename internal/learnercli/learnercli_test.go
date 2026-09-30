@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -390,13 +391,18 @@ func TestDownloadCourseUpdateRefreshesAfterUnauthorizedResponse(t *testing.T) {
 	}
 }
 
-type memorySecretStore struct{ values map[string]string }
+type memorySecretStore struct {
+	mu     sync.Mutex
+	values map[string]string
+}
 
 func newMemorySecretStore() *memorySecretStore {
 	return &memorySecretStore{values: make(map[string]string)}
 }
 
 func (s *memorySecretStore) Get(service, account string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	value, ok := s.values[service+"\x00"+account]
 	if !ok {
 		return "", keyring.ErrNotFound
@@ -405,6 +411,8 @@ func (s *memorySecretStore) Get(service, account string) (string, error) {
 }
 
 func (s *memorySecretStore) Set(service, account, secret string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.values == nil {
 		return errors.New("secret store is not initialized")
 	}
@@ -413,6 +421,8 @@ func (s *memorySecretStore) Set(service, account, secret string) error {
 }
 
 func (s *memorySecretStore) Delete(service, account string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.values, service+"\x00"+account)
 	return nil
 }

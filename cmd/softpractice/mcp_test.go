@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,6 +26,42 @@ import (
 // confirmation travels as a multi round-trip tool result, and the previous
 // one, where the server sends elicitation/create itself.
 var mcpTestProtocols = []string{"2026-07-28", "2025-11-25"}
+
+func TestMCPCheckOutputRetainsABoundedTail(t *testing.T) {
+	var buffer lockedBuffer
+	var expected strings.Builder
+	for _, chunk := range []string{"prefix", strings.Repeat("я", mcpMaxCheckOutput), "\nFAIL: last check\n"} {
+		expected.WriteString(chunk)
+		if n, err := buffer.Write([]byte(chunk)); err != nil || n != len(chunk) {
+			t.Fatalf("write = %d, %v", n, err)
+		}
+		if len(buffer.buffer) > mcpMaxCheckOutput || cap(buffer.buffer) > mcpMaxCheckOutput {
+			t.Fatal("check output buffer exceeded its limit")
+		}
+	}
+	output, truncated := buffer.snapshot()
+	want := expected.String()[expected.Len()-mcpMaxCheckOutput:]
+	for len(want) > 0 && want[0]&0xC0 == 0x80 {
+		want = want[1:]
+	}
+	if !truncated || output != want || !utf8.ValidString(output) {
+		t.Fatalf("invalid retained tail: length=%d, truncated=%t", len(output), truncated)
+	}
+}
+
+func TestMCPCheckOutputAcceptsConcurrentStreams(t *testing.T) {
+	var buffer lockedBuffer
+	var writers sync.WaitGroup
+	for _, chunk := range []string{strings.Repeat("out", 20000), strings.Repeat("err", 20000)} {
+		writers.Go(func() { _, _ = buffer.Write([]byte(chunk)) })
+	}
+	writers.Wait()
+	_, _ = buffer.Write([]byte("\nFAIL: final marker\n"))
+	output, truncated := buffer.snapshot()
+	if !truncated || len(output) > mcpMaxCheckOutput || !strings.HasSuffix(output, "\nFAIL: final marker\n") {
+		t.Fatalf("unexpected tail: length=%d, truncated=%t", len(output), truncated)
+	}
+}
 
 // leakMarkers are texts of the evaluation the MCP server must never return:
 // the reviewer's directions, the counterexamples' next steps, and the text of

@@ -31,6 +31,23 @@ func TestRunStopsInOrderAtFirstFailure(t *testing.T) {
 	}
 }
 
+func TestStdoutObserverPreservesWhitespaceSemanticsAcrossWrites(t *testing.T) {
+	for _, input := range []string{"", " \t\r\n", strings.Repeat("\u2003\u00a0\u3000", 10000), " \nx\t", "\xff", "\xe2\x80"} {
+		for _, chunkSize := range []int{1, 2, 7, 4096} {
+			var observer stdoutObserver
+			for start := 0; start < len(input); start += chunkSize {
+				end := min(start+chunkSize, len(input))
+				if n, err := observer.Write([]byte(input[start:end])); err != nil || n != end-start {
+					t.Fatalf("write = %d, %v", n, err)
+				}
+			}
+			if want := len(bytes.TrimSpace([]byte(input))) != 0; observer.hasOutput() != want {
+				t.Fatalf("chunk size %d, input length %d: hasOutput = %t, want %t", chunkSize, len(input), observer.hasOutput(), want)
+			}
+		}
+	}
+}
+
 func TestRunReportsMissingExecutableAndEmptyOutputContract(t *testing.T) {
 	err := Run(context.Background(), t.TempDir(), Config{Checks: []Check{{
 		Name: "missing", Executable: "softpractice-definitely-missing-executable", TimeoutSeconds: 1,

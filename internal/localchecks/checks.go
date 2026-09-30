@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const RelativePath = ".softpractice/checks.json"
@@ -104,8 +106,11 @@ func Run(ctx context.Context, root string, config Config, output, errorOutput io
 		// Only waitProcess owns cancellation, so the parent is not killed before
 		// the entire process tree can be terminated.
 		command.Cancel = func() error { return nil }
-		var stdout bytes.Buffer
-		command.Stdout = io.MultiWriter(output, &stdout)
+		var stdout stdoutObserver
+		command.Stdout = output
+		if check.RequireEmptyStdout {
+			command.Stdout = io.MultiWriter(output, &stdout)
+		}
 		command.Stderr = errorOutput
 		if err := command.Start(); err != nil {
 			cancel()
@@ -123,9 +128,39 @@ func Run(ctx context.Context, root string, config Config, output, errorOutput io
 		if err != nil {
 			return fmt.Errorf("check %q failed: %w", check.Name, err)
 		}
-		if check.RequireEmptyStdout && len(bytes.TrimSpace(stdout.Bytes())) != 0 {
+		if check.RequireEmptyStdout && stdout.hasOutput() {
 			return fmt.Errorf("check %q failed: expected no output", check.Name)
 		}
 	}
 	return nil
 }
+
+// stdoutObserver preserves the TrimSpace semantics of require_empty_stdout
+// without retaining the output. A whitespace rune may span multiple writes.
+type stdoutObserver struct {
+	pending  [utf8.UTFMax]byte
+	n        int
+	nonSpace bool
+}
+
+func (s *stdoutObserver) Write(data []byte) (int, error) {
+	for _, value := range data {
+		if s.nonSpace {
+			break
+		}
+		s.pending[s.n] = value
+		s.n++
+		for s.n > 0 && utf8.FullRune(s.pending[:s.n]) {
+			r, size := utf8.DecodeRune(s.pending[:s.n])
+			if !unicode.IsSpace(r) {
+				s.nonSpace = true
+				break
+			}
+			copy(s.pending[:], s.pending[size:s.n])
+			s.n -= size
+		}
+	}
+	return len(data), nil
+}
+
+func (s *stdoutObserver) hasOutput() bool { return s.nonSpace || s.n != 0 }
