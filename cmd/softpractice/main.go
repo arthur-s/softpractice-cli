@@ -242,6 +242,14 @@ func run(
 		return submit(ctx, client, "", remaining[1:], input, output, errorOutput)
 	case "open":
 		return openCurrent(ctx, client, "", remaining[1:], output, errorOutput)
+	case "mcp":
+		if *languageValue == "" && !languageChosen(config) {
+			// An MCP client often starts the server without a locale. The
+			// course is written in Russian, so its frame follows the content.
+			settings.Language = languageRussian
+			ctx = withSettings(ctx, settings)
+		}
+		return mcpCommand(ctx, client, remaining[1:], input, output, errorOutput)
 	default:
 		return usageError{message: fmt.Sprintf(text(ctx, "неизвестная команда %q", "unknown command %q"), remaining[0])}
 	}

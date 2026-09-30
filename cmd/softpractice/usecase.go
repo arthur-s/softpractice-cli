@@ -430,6 +430,9 @@ const (
 type evaluationWait struct {
 	Wait    bool
 	Timeout time.Duration
+	// Pending, when set, is told about every pending answer before the next
+	// poll, so a caller can report progress while it waits.
+	Pending func(machineSubmission)
 }
 
 // defaultEvaluationPoll is used when the server names no interval.
@@ -508,6 +511,9 @@ func (u learnerUseCases) Evaluation(
 				return evaluationResult{}, err
 			}
 			return pending, nil
+		}
+		if wait.Pending != nil && pending.Outcome != "" {
+			wait.Pending(pending.Submission)
 		}
 		if err := u.sleep(ctx, delay); err != nil {
 			return evaluationResult{}, err

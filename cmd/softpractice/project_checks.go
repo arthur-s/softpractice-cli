@@ -131,10 +131,17 @@ func (u learnerUseCases) CheckPublished(ctx context.Context, output, errorOutput
 		"Локальные публичные проверки рабочего дерева:",
 		"Local public checks for the working tree:"))
 	if err := localchecks.Run(ctx, repository.Root, checks, output, errorOutput); err != nil {
-		return err
+		return checkFailedError{err}
 	}
 	fmt.Fprintln(output, text(ctx,
 		"Все локальные публичные проверки прошли.",
 		"All local public checks passed."))
 	return nil
 }
+
+// checkFailedError is a check that ran and did not pass, as opposed to checks
+// that could not be run at all.
+type checkFailedError struct{ err error }
+
+func (e checkFailedError) Error() string { return e.err.Error() }
+func (e checkFailedError) Unwrap() error { return e.err }

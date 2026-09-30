@@ -50,11 +50,14 @@ type machineStatus struct {
 }
 
 // nextAction is one step the learner can take now. Command is a CLI command;
-// URL is a page for an action that happens on the site.
+// Tool is the `softpractice mcp` tool for it, set only in MCP output; URL is a
+// page for an action that happens on the site.
 type nextAction struct {
-	Code    string `json:"code"`
-	Command string `json:"command,omitempty"`
-	URL     string `json:"url,omitempty"`
+	Code      string         `json:"code"`
+	Command   string         `json:"command,omitempty"`
+	Tool      string         `json:"tool,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	URL       string         `json:"url,omitempty"`
 }
 
 // nextActions derives the learner's next steps from the status, most
@@ -186,6 +189,10 @@ type machineSubmissionSummary struct {
 }
 
 func writeStatusJSON(ctx context.Context, output io.Writer, snapshot statusSnapshot) error {
+	return writeMachineJSON(output, buildMachineStatus(ctx, snapshot))
+}
+
+func buildMachineStatus(ctx context.Context, snapshot statusSnapshot) machineStatus {
 	user, link, workspace, repository := snapshot.User, snapshot.Link, snapshot.Workspace, snapshot.Repository
 	payload := machineStatus{Kind: "softpractice.status"}
 	payload.Account.ID = user.ID
@@ -222,7 +229,7 @@ func writeStatusJSON(ctx context.Context, output io.Writer, snapshot statusSnaps
 		}
 	}
 	payload.NextActions = nextActions(ctx, snapshot)
-	return writeMachineJSON(output, payload)
+	return payload
 }
 
 type evaluationAPIResponse struct {

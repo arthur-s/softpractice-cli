@@ -111,6 +111,24 @@ func defaultSettings(store configStore) runtimeSettings {
 	}
 }
 
+// languageChosen reports whether the learner chose a language anywhere the
+// CLI looks for one: the saved setting, SOFTPRACTICE_LANGUAGE, or a Russian
+// or English system locale. The --lang flag is checked by the caller.
+func languageChosen(store configStore) bool {
+	if config, err := store.Load(); err == nil && config.Language != "" {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("SOFTPRACTICE_LANGUAGE")) != "" {
+		return true
+	}
+	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
+		if languageFromLocale(os.Getenv(name)) != "" {
+			return true
+		}
+	}
+	return languageFromLocale(systemLocaleName()) != ""
+}
+
 func detectSystemLanguage() language {
 	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		if detected := languageFromLocale(os.Getenv(name)); detected != "" {
@@ -176,6 +194,7 @@ func printHelp(ctx context.Context, output io.Writer) {
   submissions           Показать отправки урока
   update                Применить переход к следующему уроку
   open                  Открыть задание, материал или результат в браузере
+  mcp                   MCP-сервер для Claude Code, Codex и Claude Desktop
 
 Настройки:
   set api-url URL       Сохранить адрес API
@@ -218,6 +237,7 @@ Solution:
   submissions           Show the lesson's submissions
   update                Apply the next lesson transition
   open                  Open the task, material, or result in a browser
+  mcp                   MCP server for Claude Code, Codex, and Claude Desktop
 
 Settings:
   set api-url URL       Save the API address
@@ -269,6 +289,8 @@ func printCommandHelp(ctx context.Context, output io.Writer, command string) err
 		russian, english = "Использование: softpractice check\n\nЗапускает публичные проверки для текущего рабочего дерева, включая незакоммиченные изменения. Ничего не отправляет на сервер.", "Usage: softpractice check\n\nRuns public checks against the current working tree, including uncommitted changes. Does not submit anything to the server."
 	case "update":
 		russian, english = "Использование: softpractice update\n\nПосле принятия решения применяет в этом же проекте переход к следующему уроку: добавляет, заменяет или удаляет только явно объявленные файлы.\n\nПереход применяется к принятому решению прошлого урока. Если текущий коммит — другой, команда ничего не меняет и показывает оба коммита и способ продолжить.", "Usage: softpractice update\n\nAfter acceptance, applies the next-lesson transition in the same project, adding, replacing, or removing only explicitly declared files.\n\nThe transition applies to the accepted solution of the previous lesson. When the current commit is a different one, the command changes nothing and shows both commits and how to continue."
+	case "mcp":
+		russian, english = "Использование: softpractice mcp [--project DIR]\n\nЗапускает локальный MCP-сервер на stdio для Claude Code, Codex, Claude Desktop и других агентов. Инструменты: status, task, material, hints, check, submit, result, submissions, update. submit и update просят подтверждения человека. Рекомендации рецензента и текст его вопросов сервер не отдаёт. Сначала войдите: softpractice login. --project задаёт папку проекта, если клиент запускает сервер не в ней. Язык сообщений: --lang, SOFTPRACTICE_LANGUAGE или set lang; по умолчанию русский.", "Usage: softpractice mcp [--project DIR]\n\nStarts a local stdio MCP server for Claude Code, Codex, Claude Desktop, and other agents. Tools: status, task, material, hints, check, submit, result, submissions, update. submit and update ask a person to confirm. The server never returns the reviewer's directions or the text of the reviewer's questions. Sign in first: softpractice login. --project sets the project folder when the client starts the server elsewhere. Message language: --lang, SOFTPRACTICE_LANGUAGE, or set lang; Russian by default."
 	case "open":
 		russian, english = "Использование: softpractice open [task|material|result] [--web URL] [--no-browser]\n\nОткрывает в браузере задание, материал или последний результат. Без аргумента — результат, а до первой отправки — задание.", "Usage: softpractice open [task|material|result] [--web URL] [--no-browser]\n\nOpens the task, the material, or the latest result in a browser. Without an argument: the result, or the task before the first submission."
 	case "set":
