@@ -358,37 +358,6 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 		t.Fatalf("machine submission = %+v", submissionPayload)
 	}
 
-	var submissionJSONV2 bytes.Buffer
-	if err := submissionCommand(
-		context.Background(), client, repositoryRoot,
-		[]string{"show", "--id", submissionID, "--format", "json-v2"},
-		&submissionJSONV2, &statusErrors,
-	); err != nil {
-		t.Fatal(err)
-	}
-	var submissionPayloadV2 machineSubmissionV2
-	if err := decodeTestJSON(submissionJSONV2.Bytes(), &submissionPayloadV2); err != nil {
-		t.Fatal(err)
-	}
-	var evaluationV2 struct {
-		Deterministic struct {
-			Checks []struct {
-				ID string `json:"id"`
-			} `json:"checks"`
-		} `json:"deterministic"`
-		Review struct {
-			Summary  string `json:"summary"`
-			Feedback []any  `json:"feedback"`
-		} `json:"review"`
-	}
-	if submissionPayloadV2.ContractVersion != 2 || !submissionPayloadV2.Terminal ||
-		json.Unmarshal(submissionPayloadV2.Evaluation, &evaluationV2) != nil ||
-		len(evaluationV2.Deterministic.Checks) != 1 ||
-		evaluationV2.Deterministic.Checks[0].ID != "public-regression" ||
-		evaluationV2.Review.Summary != "safe feedback" || len(evaluationV2.Review.Feedback) != 1 {
-		t.Fatalf("machine submission v2 = %+v, evaluation = %+v", submissionPayloadV2, evaluationV2)
-	}
-
 	for range 2 {
 		var submitOutput, submitErrors bytes.Buffer
 		if err := submit(

@@ -195,25 +195,6 @@ type machineSubmission struct {
 	Evaluation      *machineEvaluation `json:"evaluation,omitempty"`
 }
 
-// machineSubmissionV2 preserves the entire learner-safe evaluation projection
-// returned by the public API. Version 1 intentionally exposes a compact
-// summary; v2 is for automation that must assert individual safe checks and
-// review fields without parsing human-oriented CLI output.
-type machineSubmissionV2 struct {
-	ContractVersion int             `json:"contract_version"`
-	Kind            string          `json:"kind"`
-	SubmissionID    string          `json:"submission_id"`
-	EvaluationJobID string          `json:"evaluation_job_id"`
-	JobState        string          `json:"job_state"`
-	Terminal        bool            `json:"terminal"`
-	Attempt         int             `json:"attempt"`
-	MaxAttempts     int             `json:"max_attempts"`
-	NextPollSeconds int             `json:"next_poll_seconds,omitempty"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	ResultPath      string          `json:"result_path"`
-	Evaluation      json.RawMessage `json:"evaluation,omitempty"`
-}
-
 func submissionCommand(
 	ctx context.Context,
 	client *learnercli.Client,
@@ -244,22 +225,16 @@ func showSubmission(
 	flags := flag.NewFlagSet("submission show", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	id := flags.String("id", "", "submission ID; defaults to the latest linked submission")
-	format := flags.String("format", "text", "output format: text, json, or json-v2")
+	format := flags.String("format", "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: softpractice submission show [--id ID] [--format text|json|json-v2]")
+		return errors.New("usage: softpractice submission show [--id ID] [--format text|json]")
 	}
-	formatValue := strings.ToLower(strings.TrimSpace(*format))
-	outputFormat := outputFormatText
-	jsonV2 := formatValue == "json-v2"
-	if !jsonV2 {
-		var err error
-		outputFormat, err = parseOutputFormat(formatValue)
-		if err != nil {
-			return errors.New("format must be text, json, or json-v2")
-		}
+	outputFormat, err := parseOutputFormat(*format)
+	if err != nil {
+		return err
 	}
 	submissionID := strings.TrimSpace(*id)
 	useCases := newLearnerUseCases(client, startDirectory)
@@ -292,9 +267,6 @@ func showSubmission(
 	}
 	if payload.SubmissionID != submissionID {
 		return errors.New("evaluation response does not match the requested submission")
-	}
-	if jsonV2 {
-		return writeMachineJSON(output, normalizeSubmissionResponseV2(payload, response.Evaluation))
 	}
 	if outputFormat == outputFormatJSON {
 		return writeMachineJSON(output, payload)
@@ -445,29 +417,6 @@ func normalizeSubmissionResponse(response evaluationAPIResponse) (machineSubmiss
 	}
 	payload.Evaluation = &machine
 	return payload, nil
-}
-
-func normalizeSubmissionResponseV2(
-	payload machineSubmission,
-	evaluation json.RawMessage,
-) machineSubmissionV2 {
-	result := machineSubmissionV2{
-		ContractVersion: 2,
-		Kind:            payload.Kind,
-		SubmissionID:    payload.SubmissionID,
-		EvaluationJobID: payload.EvaluationJobID,
-		JobState:        payload.JobState,
-		Terminal:        payload.Terminal,
-		Attempt:         payload.Attempt,
-		MaxAttempts:     payload.MaxAttempts,
-		NextPollSeconds: payload.NextPollSeconds,
-		UpdatedAt:       payload.UpdatedAt,
-		ResultPath:      payload.ResultPath,
-	}
-	if payload.Terminal {
-		result.Evaluation = append(json.RawMessage(nil), evaluation...)
-	}
-	return result
 }
 
 func writeMachineJSON(output io.Writer, payload any) error {
