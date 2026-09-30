@@ -34,6 +34,12 @@ const mcpReviewFeedback = feedbackWithoutDirections
 // its own timeout, so the agent should ask for less than that.
 const mcpMaxWait = 600
 
+// mcpSuggestedWait is the wait_seconds status suggests for a pending
+// evaluation. It stays below the shortest default tool call timeout among
+// common clients, Codex's 60 seconds; the agent calls result again if the
+// evaluation is still pending.
+const mcpSuggestedWait = 45
+
 // mcpMaxCheckOutput bounds the check output a tool result carries; the end of
 // the output, where a failure is reported, is kept.
 const mcpMaxCheckOutput = 32 << 10
@@ -229,7 +235,7 @@ func mcpNextActions(actions []nextAction) []nextAction {
 		case "apply_update", "update_lesson_version":
 			action.Tool = "update"
 		case "wait_result":
-			action.Tool, action.Arguments = "result", map[string]any{"wait_seconds": 60}
+			action.Tool, action.Arguments = "result", map[string]any{"wait_seconds": mcpSuggestedWait}
 		case "read_result":
 			action.Tool = "result"
 		}

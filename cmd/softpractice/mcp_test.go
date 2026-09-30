@@ -316,7 +316,7 @@ func TestMCPNextActionsNameTools(t *testing.T) {
 		{Code: "answer_questions", URL: "https://softpractice.example/submissions/x/result"},
 	})
 	if actions[0].Tool != "submit" || actions[0].Command != "" ||
-		actions[1].Tool != "result" || actions[1].Arguments["wait_seconds"] != 60 ||
+		actions[1].Tool != "result" || actions[1].Arguments["wait_seconds"] != mcpSuggestedWait ||
 		actions[2].Tool != "" || actions[2].Command != "git stash" ||
 		actions[3].Tool != "" || actions[3].URL == "" {
 		t.Fatalf("next actions = %+v", actions)
