@@ -331,7 +331,7 @@ func TestLinkedStatusSubmitAndOpenCommandFlow(t *testing.T) {
 	if err := decodeTestJSON(statusJSON.Bytes(), &statusPayload); err != nil {
 		t.Fatal(err)
 	}
-	if statusPayload.ContractVersion != 1 || statusPayload.Kind != "softpractice.status" ||
+	if statusPayload.Kind != "softpractice.status" ||
 		statusPayload.Local.Head == "" || !statusPayload.Local.Clean ||
 		statusPayload.LatestSubmission == nil || statusPayload.LatestSubmission.ID != submissionID {
 		t.Fatalf("machine status = %+v", statusPayload)

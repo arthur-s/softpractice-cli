@@ -113,16 +113,17 @@ tree and run in an isolated snapshot of `HEAD`.
 ## Machine-readable output
 
 `status`, `submission show`, `evaluation`, and `assignment show` accept
-`--format json`. Each document has `contract_version` and `kind`.
+`--format json`. Each document has a `kind`.
 
 ```bash
 softpractice evaluation --wait --timeout 10m --format json
 ```
 
 `evaluation` exit codes: `0` result ready, `1` error, `3` not ready yet,
-`4` evaluation superseded, no result. Its output has the verdict, the
-automated check results, and the number and priorities of reviewer findings,
-without the reviewer's recommendations; the full review is at `result_url`.
+`4` evaluation superseded, no result. Its output has the automated check
+results and the review without the reviewer's recommendations;
+`--directions` adds them. The reviewer's questions are on the result page at
+`result_url`.
 
 ## Language
 

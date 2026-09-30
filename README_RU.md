@@ -115,7 +115,7 @@ softpractice set auto-checks true
 ## Машиночитаемый вывод
 
 `status`, `submission show`, `evaluation` и `assignment show` принимают
-`--format json`. У каждого документа есть `contract_version` и `kind`.
+`--format json`. У каждого документа есть поле `kind`.
 
 ```bash
 softpractice evaluation --wait --timeout 10m --format json
@@ -123,8 +123,9 @@ softpractice evaluation --wait --timeout 10m --format json
 
 Коды выхода `evaluation`: `0` — результат готов, `1` — ошибка, `3` — проверка
 ещё не готова, `4` — проверка заменена, результата не будет. В выводе есть
-вердикт, результаты автоматических проверок, число и приоритеты замечаний
-рецензента, но нет его рекомендаций; полный разбор — по ссылке `result_url`.
+результаты автоматических проверок и ревью без рекомендаций рецензента;
+`--directions` добавляет их. Вопросы рецензента — на странице результата по
+ссылке `result_url`.
 
 ## Язык
 

@@ -36,9 +36,8 @@ func parseOutputFormat(value string) (outputFormat, error) {
 }
 
 type machineStatus struct {
-	ContractVersion int    `json:"contract_version"`
-	Kind            string `json:"kind"`
-	Account         struct {
+	Kind    string `json:"kind"`
+	Account struct {
 		ID            string `json:"id"`
 		EmailVerified bool   `json:"email_verified"`
 	} `json:"account"`
@@ -58,11 +57,10 @@ type machineStatus struct {
 		Clean bool   `json:"clean"`
 	} `json:"local"`
 	// Transition is present only while the server has already opened the next
-	// lesson and this folder still holds the previous one. It is additive: a
-	// contract_version 1 reader that ignores unknown keys is unaffected.
+	// lesson and this folder still holds the previous one.
 	Transition *machineTransition `json:"transition,omitempty"`
 	// LessonVersionUpdate is present while the server publishes a newer
-	// version of the lesson this folder holds. Additive like Transition.
+	// version of the lesson this folder holds.
 	LessonVersionUpdate *machineLessonVersionUpdate `json:"lesson_version_update,omitempty"`
 	LatestSubmission    *machineSubmissionSummary   `json:"latest_submission"`
 }
@@ -92,7 +90,7 @@ type machineSubmissionSummary struct {
 
 func writeStatusJSON(output io.Writer, snapshot statusSnapshot) error {
 	user, link, workspace, repository := snapshot.User, snapshot.Link, snapshot.Workspace, snapshot.Repository
-	payload := machineStatus{ContractVersion: 1, Kind: "softpractice.status"}
+	payload := machineStatus{Kind: "softpractice.status"}
 	payload.Account.ID = user.ID
 	payload.Account.EmailVerified = user.EmailVerified
 	payload.Workspace.ID = workspace.Workspace.ID
@@ -181,7 +179,6 @@ type machineTechnicalError struct {
 }
 
 type machineSubmission struct {
-	ContractVersion int                `json:"contract_version"`
 	Kind            string             `json:"kind"`
 	SubmissionID    string             `json:"submission_id"`
 	EvaluationJobID string             `json:"evaluation_job_id"`
@@ -352,7 +349,7 @@ func normalizeSubmissionResponse(response evaluationAPIResponse) (machineSubmiss
 		return machineSubmission{}, errors.New("evaluation response is incomplete")
 	}
 	payload := machineSubmission{
-		ContractVersion: 1, Kind: "softpractice.submission",
+		Kind:         "softpractice.submission",
 		SubmissionID: response.SubmissionID, EvaluationJobID: response.EvaluationJobID,
 		JobState: response.JobState, Attempt: response.Attempt, MaxAttempts: response.MaxAttempts,
 		NextPollSeconds: response.NextPollSeconds, UpdatedAt: response.UpdatedAt,

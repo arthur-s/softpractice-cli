@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -30,21 +29,18 @@ const (
 const defaultEvaluationTimeout = 10 * time.Minute
 
 type machineEvaluationResult struct {
-	ContractVersion int                `json:"contract_version"`
-	Kind            string             `json:"kind"`
-	Outcome         evaluationOutcome  `json:"outcome"`
-	SubmissionID    string             `json:"submission_id"`
-	EvaluationJobID string             `json:"evaluation_job_id,omitempty"`
-	JobState        string             `json:"job_state"`
-	Terminal        bool               `json:"terminal"`
-	Attempt         int                `json:"attempt,omitempty"`
-	MaxAttempts     int                `json:"max_attempts,omitempty"`
-	NextPollSeconds int                `json:"next_poll_seconds,omitempty"`
-	UpdatedAt       *time.Time         `json:"updated_at,omitempty"`
-	ResultPath      string             `json:"result_path"`
-	ResultURL       string             `json:"result_url"`
-	Evaluation      *machineEvaluation `json:"evaluation,omitempty"`
-	Feedback        *machineFeedback   `json:"feedback,omitempty"`
+	Kind            string            `json:"kind"`
+	Outcome         evaluationOutcome `json:"outcome"`
+	SubmissionID    string            `json:"submission_id"`
+	EvaluationJobID string            `json:"evaluation_job_id,omitempty"`
+	JobState        string            `json:"job_state"`
+	Attempt         int               `json:"attempt,omitempty"`
+	MaxAttempts     int               `json:"max_attempts,omitempty"`
+	NextPollSeconds int               `json:"next_poll_seconds,omitempty"`
+	UpdatedAt       *time.Time        `json:"updated_at,omitempty"`
+	ResultURL       string            `json:"result_url"`
+	// Result is present only for the ready outcome.
+	Result *machineResult `json:"result,omitempty"`
 }
 
 func buildMachineEvaluationResult(
@@ -53,32 +49,27 @@ func buildMachineEvaluationResult(
 	detail reviewFeedbackDetail,
 ) (machineEvaluationResult, error) {
 	payload := machineEvaluationResult{
-		ContractVersion: 1, Kind: "softpractice.evaluation",
-		Outcome: result.Outcome, SubmissionID: result.SubmissionID,
-		ResultPath: "/submissions/" + result.SubmissionID + "/result",
+		Kind: "softpractice.evaluation", Outcome: result.Outcome, SubmissionID: result.SubmissionID,
+		ResultURL: strings.TrimRight(webURL, "/") + "/submissions/" + result.SubmissionID + "/result",
 	}
-	payload.ResultURL = strings.TrimRight(webURL, "/") + payload.ResultPath
 	if result.Outcome == evaluationSuperseded {
 		payload.JobState = "superseded"
-		payload.Terminal = true
 		return payload, nil
 	}
 	submission := result.Submission
 	updatedAt := submission.UpdatedAt
 	payload.EvaluationJobID = submission.EvaluationJobID
 	payload.JobState = submission.JobState
-	payload.Terminal = submission.Terminal
 	payload.Attempt = submission.Attempt
 	payload.MaxAttempts = submission.MaxAttempts
 	payload.NextPollSeconds = submission.NextPollSeconds
 	payload.UpdatedAt = &updatedAt
-	payload.Evaluation = submission.Evaluation
-	if result.Outcome == evaluationReady && len(result.RawEvaluation) != 0 {
-		feedback, err := buildMachineFeedback(result.RawEvaluation, detail)
+	if result.Outcome == evaluationReady {
+		built, err := buildMachineResult(result.RawEvaluation, detail)
 		if err != nil {
 			return machineEvaluationResult{}, err
 		}
-		payload.Feedback = feedback
+		payload.Result = built
 	}
 	return payload, nil
 }
@@ -94,13 +85,14 @@ func evaluationCommand(
 	id := flags.String("id", "", "submission ID; defaults to the latest linked submission")
 	wait := flags.Bool("wait", false, "poll until the evaluation is ready")
 	timeout := flags.Duration("timeout", defaultEvaluationTimeout, "maximum wait with --wait")
+	directions := flags.Bool("directions", false, "also print the reviewer's directions and next steps")
 	format := flags.String("format", "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	usage := text(ctx,
-		"использование: softpractice evaluation [--id ID] [--wait] [--timeout DURATION] [--format text|json]",
-		"usage: softpractice evaluation [--id ID] [--wait] [--timeout DURATION] [--format text|json]")
+		"использование: softpractice evaluation [--id ID] [--wait] [--timeout DURATION] [--directions] [--format text|json]",
+		"usage: softpractice evaluation [--id ID] [--wait] [--timeout DURATION] [--directions] [--format text|json]")
 	if flags.NArg() != 0 || *timeout < 0 {
 		return errors.New(usage)
 	}
@@ -108,7 +100,11 @@ func evaluationCommand(
 	if err != nil {
 		return err
 	}
-	payload, err := evaluationPayload(ctx, useCases, strings.TrimSpace(*id), *wait, *timeout, errorOutput)
+	detail := defaultReviewFeedback
+	if *directions {
+		detail = feedbackWithDirections
+	}
+	payload, err := evaluationPayload(ctx, useCases, strings.TrimSpace(*id), *wait, *timeout, detail, errorOutput)
 	if err != nil {
 		if outputFormat == outputFormatJSON {
 			_ = writeMachineError(output, err)
@@ -120,7 +116,7 @@ func evaluationCommand(
 			return err
 		}
 	} else {
-		writeEvaluationText(ctx, output, payload)
+		writeEvaluationMarkdown(ctx, output, payload)
 	}
 	switch payload.Outcome {
 	case evaluationPending:
@@ -137,6 +133,7 @@ func evaluationPayload(
 	submissionID string,
 	wait bool,
 	timeout time.Duration,
+	detail reviewFeedbackDetail,
 	errorOutput io.Writer,
 ) (machineEvaluationResult, error) {
 	if submissionID == "" {
@@ -156,83 +153,169 @@ func evaluationPayload(
 	if err != nil {
 		return machineEvaluationResult{}, err
 	}
-	return buildMachineEvaluationResult(result, settingsFromContext(ctx).WebURL, machineReviewFeedback)
+	return buildMachineEvaluationResult(result, settingsFromContext(ctx).WebURL, detail)
 }
 
-func writeEvaluationText(ctx context.Context, output io.Writer, payload machineEvaluationResult) {
-	fmt.Fprintf(output, text(ctx, "Отправка: %s\n", "Submission: %s\n"), payload.SubmissionID)
+// writeEvaluationMarkdown prints the evaluation as Markdown, which reads as
+// plain text in a terminal and renders in an agent's chat.
+func writeEvaluationMarkdown(ctx context.Context, output io.Writer, payload machineEvaluationResult) {
 	switch payload.Outcome {
 	case evaluationSuperseded:
-		fmt.Fprintln(output, text(ctx,
-			"Проверка этой отправки заменена; результата у неё не будет.",
-			"This evaluation was superseded; it will not have a result."))
+		fmt.Fprintf(output, text(ctx,
+			"Проверка отправки `%s` заменена; результата у неё не будет.\n",
+			"The evaluation of submission `%s` was superseded; it will not have a result.\n"),
+			payload.SubmissionID)
 		return
 	case evaluationPending:
 		fmt.Fprintf(output, text(ctx,
-			"Проверка ещё не готова (%s). Повторите: softpractice evaluation --wait\n",
-			"The evaluation is not ready yet (%s). Check again: softpractice evaluation --wait\n"),
-			payload.JobState)
+			"Проверка отправки `%s` ещё не готова (%s). Дождаться: `softpractice evaluation --wait`\n",
+			"The evaluation of submission `%s` is not ready yet (%s). To wait: `softpractice evaluation --wait`\n"),
+			payload.SubmissionID, payload.JobState)
 		return
 	}
-	if payload.Evaluation != nil {
-		fmt.Fprintf(output, text(ctx, "Результат: %s\n", "Result: %s\n"), payload.Evaluation.Status)
-		if technical := payload.Evaluation.TechnicalError; technical != nil {
-			fmt.Fprintf(output, text(ctx, "Техническая ошибка: %s (%s), support %s\n", "Technical error: %s (%s), support %s\n"),
-				technical.ErrorCode, technical.Stage, technical.SupportID)
-		}
+	result := payload.Result
+	fmt.Fprintf(output, "# %s\n\n", evaluationStatusTitle(ctx, result.Status))
+	fmt.Fprintf(output, text(ctx, "Отправка `%s`, попытка проверки %d из %d.\n", "Submission `%s`, evaluation attempt %d of %d.\n"),
+		payload.SubmissionID, payload.Attempt, payload.MaxAttempts)
+	if technical := result.TechnicalError; technical != nil {
+		fmt.Fprintf(output, text(ctx, "\nТехническая ошибка: `%s` на этапе `%s`, support ID `%s`.\n",
+			"\nTechnical error: `%s` at stage `%s`, support ID `%s`.\n"),
+			technical.ErrorCode, technical.Stage, technical.SupportID)
 	}
-	if feedback := payload.Feedback; feedback != nil {
-		if deterministic := feedback.Deterministic; deterministic != nil {
-			fmt.Fprintf(output, text(ctx, "Автоматические проверки: %s\n", "Automated checks: %s\n"), deterministic.Status)
-			for _, check := range deterministic.Checks {
-				fmt.Fprintf(output, "  %-4s %s: %s\n", check.Status, check.ID, check.Summary)
-			}
-		}
-		if review := feedback.Review; review != nil && review.Status != "skipped" {
-			verdict := "-"
-			if review.Verdict != nil {
-				verdict = *review.Verdict
-			}
-			fmt.Fprintf(output, text(ctx, "Ревью: %s (%s)\n", "Review: %s (%s)\n"), verdict, review.Mode)
-			fmt.Fprintf(output, text(ctx, "Замечаний рецензента: %d%s\n", "Reviewer findings: %d%s\n"),
-				review.FindingsCount, formatPriorityCounts(review.FindingsByPriority))
-			for _, finding := range review.Findings {
-				fmt.Fprintf(output, "  [%s] %s\n", finding.Priority, finding.Title)
+	if deterministic := result.Deterministic; deterministic != nil {
+		fmt.Fprintf(output, text(ctx, "\n## Автоматические проверки: %s\n\n", "\n## Automated checks: %s\n\n"),
+			deterministicStatusLabel(ctx, deterministic.Status))
+		for _, check := range deterministic.Checks {
+			fmt.Fprintf(output, "- [%s] %s: %s\n", check.Status, check.ID, check.Summary)
+			if example := check.Counterexample; example != nil {
+				fmt.Fprintf(output, text(ctx, "  - Пример: %s\n", "  - Example: %s\n"), example.Title)
+				fmt.Fprintf(output, text(ctx, "  - Сценарий: %s\n", "  - Scenario: %s\n"), example.Scenario)
+				fmt.Fprintf(output, text(ctx, "  - Вход: %s\n", "  - Input: %s\n"), example.Input)
+				fmt.Fprintf(output, text(ctx, "  - Ожидалось: %s\n", "  - Expected: %s\n"), example.Expected)
+				if example.NextStep != "" {
+					fmt.Fprintf(output, text(ctx, "  - Следующий шаг: %s\n", "  - Next step: %s\n"), example.NextStep)
+				}
 			}
 		}
 	}
-	fmt.Fprintf(output, text(ctx, "Полный разбор: %s\n", "Full review: %s\n"), payload.ResultURL)
+	if review := result.Review; review != nil && review.Status != "skipped" {
+		fmt.Fprint(output, text(ctx, "\n## Ревью\n", "\n## Review\n"))
+		if !review.Authoritative {
+			fmt.Fprint(output, text(ctx,
+				"\nПредварительное ревью: оно не определяет результат.\n",
+				"\nPreliminary review: it does not decide the result.\n"))
+		}
+		if review.Summary != "" {
+			fmt.Fprintf(output, "\n%s\n", review.Summary)
+		}
+		if uncertainty := review.Uncertainty; uncertainty != nil && uncertainty.Reason != nil && *uncertainty.Reason != "" {
+			fmt.Fprintf(output, text(ctx, "\nЧто осталось неясным: %s\n", "\nWhat remains unclear: %s\n"), *uncertainty.Reason)
+		}
+		if len(review.Rubric) > 0 {
+			fmt.Fprint(output, text(ctx, "\n### Критерии\n\n", "\n### Criteria\n\n"))
+			for _, item := range review.Rubric {
+				fmt.Fprintf(output, "- **%s**: %s. %s%s\n", item.Criterion, rubricLevelLabel(ctx, item.Level),
+					item.Rationale, formatEvidence(ctx, item.EvidenceRefs))
+			}
+		}
+		if len(review.Findings) > 0 {
+			fmt.Fprint(output, text(ctx, "\n### Замечания\n", "\n### Findings\n"))
+			for index, finding := range review.Findings {
+				fmt.Fprintf(output, "\n%d. **%s** (%s)\n", index+1, finding.Title, priorityLabel(ctx, finding.Priority))
+				fmt.Fprintf(output, text(ctx, "   - Наблюдение: %s\n", "   - Observation: %s\n"), finding.Observation)
+				fmt.Fprintf(output, text(ctx, "   - Риск: %s\n", "   - Risk: %s\n"), finding.Risk)
+				if finding.Direction != "" {
+					fmt.Fprintf(output, text(ctx, "   - Направление: %s\n", "   - Direction: %s\n"), finding.Direction)
+				}
+				if len(finding.EvidenceRefs) > 0 {
+					fmt.Fprintf(output, text(ctx, "   - Где: %s\n", "   - Where: %s\n"), strings.Join(finding.EvidenceRefs, ", "))
+				}
+			}
+		}
+		if review.QuestionsCount > 0 {
+			fmt.Fprintf(output, text(ctx,
+				"\nВопросов рецензента к решению: %d. Они на странице результата.\n",
+				"\nReviewer questions about the solution: %d. They are on the result page.\n"),
+				review.QuestionsCount)
+		}
+	}
+	if result.DirectionsHidden {
+		fmt.Fprint(output, text(ctx,
+			"\nРекомендации рецензента не показаны. Показать: `softpractice evaluation --directions`\n",
+			"\nThe reviewer's recommendations are not shown. To show them: `softpractice evaluation --directions`\n"))
+	}
+	fmt.Fprintf(output, text(ctx, "\nПолный разбор: %s\n", "\nFull review: %s\n"), payload.ResultURL)
 }
 
-func formatPriorityCounts(counts map[string]int) string {
-	if len(counts) == 0 {
+func evaluationStatusTitle(ctx context.Context, status string) string {
+	switch status {
+	case "accepted":
+		return text(ctx, "Решение принято", "Solution accepted")
+	case "revise":
+		return text(ctx, "Нужна доработка", "Revision needed")
+	case "uncertain":
+		return text(ctx, "Рецензенту нужно пояснение", "The reviewer needs an explanation")
+	case "deterministic_failed":
+		return text(ctx, "Автоматические проверки не пройдены", "Automated checks failed")
+	case "ready_for_review":
+		return text(ctx, "Автоматические проверки пройдены", "Automated checks passed")
+	case "technical_failure":
+		return text(ctx, "Проверка не завершилась из-за технической ошибки", "The evaluation failed for a technical reason")
+	default:
+		return status
+	}
+}
+
+func deterministicStatusLabel(ctx context.Context, status string) string {
+	switch status {
+	case "passed":
+		return text(ctx, "пройдены", "passed")
+	case "failed":
+		return text(ctx, "не пройдены", "failed")
+	case "not_run":
+		return text(ctx, "не запускались", "not run")
+	case "technical_failure":
+		return text(ctx, "техническая ошибка", "technical failure")
+	default:
+		return status
+	}
+}
+
+// rubricLevelLabel uses the level names of the result page.
+func rubricLevelLabel(ctx context.Context, level int) string {
+	switch level {
+	case 1:
+		return text(ctx, "нужно доработать", "needs work")
+	case 2:
+		return text(ctx, "выполнено", "met")
+	case 3:
+		return text(ctx, "выполнено и закреплено", "met and reinforced")
+	default:
+		return text(ctx, "не подтверждено", "not confirmed")
+	}
+}
+
+func priorityLabel(ctx context.Context, priority string) string {
+	switch priority {
+	case "high":
+		return text(ctx, "высокий приоритет", "high priority")
+	case "medium":
+		return text(ctx, "средний приоритет", "medium priority")
+	case "low":
+		return text(ctx, "низкий приоритет", "low priority")
+	default:
+		return priority
+	}
+}
+
+func formatEvidence(ctx context.Context, refs []string) string {
+	if len(refs) == 0 {
 		return ""
 	}
-	order := map[string]int{"high": 0, "medium": 1, "low": 2}
-	keys := make([]string, 0, len(counts))
-	for key := range counts {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		left, leftKnown := order[keys[i]]
-		right, rightKnown := order[keys[j]]
-		if leftKnown != rightKnown {
-			return leftKnown
-		}
-		if left != right {
-			return left < right
-		}
-		return keys[i] < keys[j]
-	})
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, fmt.Sprintf("%s %d", key, counts[key]))
-	}
-	return " (" + strings.Join(parts, ", ") + ")"
+	return text(ctx, " Где: ", " Where: ") + strings.Join(refs, ", ")
 }
 
 type machineAssignment struct {
-	ContractVersion     int                         `json:"contract_version"`
 	Kind                string                      `json:"kind"`
 	WorkspaceID         string                      `json:"workspace_id"`
 	ProjectID           string                      `json:"project_id"`
@@ -275,7 +358,7 @@ func assignmentCommand(
 		return err
 	}
 	payload := machineAssignment{
-		ContractVersion: 1, Kind: "softpractice.assignment",
+		Kind:        "softpractice.assignment",
 		WorkspaceID: snapshot.Workspace.Workspace.ID, ProjectID: snapshot.Link.ProjectID,
 		Assignment: snapshot.Assignment, Material: snapshot.Material,
 	}
@@ -312,9 +395,8 @@ func assignmentCommand(
 // JSON mode, so a caller that reads only stdout still learns why the command
 // failed. The same message also goes to standard error.
 type machineError struct {
-	ContractVersion int    `json:"contract_version"`
-	Kind            string `json:"kind"`
-	Error           struct {
+	Kind  string `json:"kind"`
+	Error struct {
 		Code       string `json:"code"`
 		Message    string `json:"message"`
 		HTTPStatus int    `json:"http_status,omitempty"`
@@ -347,7 +429,7 @@ func errorCode(err error) string {
 }
 
 func writeMachineError(output io.Writer, err error) error {
-	payload := machineError{ContractVersion: 1, Kind: "softpractice.error"}
+	payload := machineError{Kind: "softpractice.error"}
 	payload.Error.Code = errorCode(err)
 	payload.Error.Message = err.Error()
 	var statusError *learnercli.HTTPError

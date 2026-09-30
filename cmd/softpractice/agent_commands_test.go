@@ -70,12 +70,15 @@ func reviseEvaluationBody(submissionID string) map[string]any {
 				map[string]any{"id": "open-scenarios", "kind": "public_tests", "status": "pass", "summary": "Open scenarios passed."},
 				map[string]any{
 					"id": "required-scenarios", "kind": "required_behavior", "status": "pass", "summary": "Required behavior confirmed.",
-					"counterexample": nil,
+					"counterexample": map[string]any{
+						"title": "COUNTEREXAMPLE-TITLE", "scenario": "SCENARIO-TEXT", "input": "INPUT-TEXT",
+						"expected": "EXPECTED-TEXT", "next_step": "NEXT-STEP-TEXT",
+					},
 				},
 			}},
 			"review": map[string]any{
 				"projection_version": 1, "status": "completed", "mode": "llm",
-				"authoritative": true, "verdict": "revise",
+				"authoritative": true, "verdict": "revise", "summary": "REVIEW-SUMMARY-TEXT",
 				"defense_questions": []any{"DEFENSE-QUESTION-TEXT"},
 				"uncertainty":       map[string]any{"blocking": false, "reason": nil},
 				"rubric": []any{
@@ -159,23 +162,18 @@ func TestEvaluationWaitHonoursRetryAfterAndHidesDirections(t *testing.T) {
 	if want := []time.Duration{7 * time.Second, 5 * time.Second}; !reflect.DeepEqual(clock.sleeps, want) {
 		t.Fatalf("sleeps = %v, want %v", clock.sleeps, want)
 	}
-	for _, secret := range []string{
-		reviewerDirectionMarker, "OBSERVATION-TEXT", "RISK-TEXT", "FINDING-TITLE-TEXT",
-		"RUBRIC-RATIONALE-TEXT", "DEFENSE-QUESTION-TEXT", `"direction"`,
-	} {
-		if strings.Contains(output, secret) {
-			t.Fatalf("JSON output contains %q:\n%s", secret, output)
-		}
-	}
+	assertEvaluationOutput(t, output, false)
 	var payload machineEvaluationResult
 	if err := decodeTestJSON([]byte(output), &payload); err != nil {
 		t.Fatal(err)
 	}
-	review := payload.Feedback.Review
-	if payload.Outcome != evaluationReady || payload.Evaluation.Status != "revise" ||
-		payload.Feedback.Detail != reviewFeedbackSummary || review.FindingsCount != 2 ||
-		review.FindingsByPriority["high"] != 1 || review.FindingsByPriority["medium"] != 1 ||
-		*review.Verdict != "revise" || len(review.Rubric) != 2 || review.Rubric[0].Level != 1 ||
+	result := payload.Result
+	if payload.Outcome != evaluationReady || result.Status != "revise" ||
+		result.Detail != feedbackWithoutDirections || !result.DirectionsHidden ||
+		len(result.Review.Findings) != 2 || result.Review.Findings[0].Observation != "OBSERVATION-TEXT" ||
+		result.Review.QuestionsCount != 1 || *result.Review.Verdict != "revise" ||
+		len(result.Review.Rubric) != 2 || result.Review.Rubric[0].Rationale != "RUBRIC-RATIONALE-TEXT" ||
+		result.Deterministic.Checks[1].Counterexample.Expected != "EXPECTED-TEXT" ||
 		payload.ResultURL != "https://softpractice.example/submissions/"+currentSubmissionID+"/result" {
 		t.Fatalf("unexpected payload: %+v", payload)
 	}
@@ -184,26 +182,58 @@ func TestEvaluationWaitHonoursRetryAfterAndHidesDirections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(text, reviewerDirectionMarker) || strings.Contains(text, "FINDING-TITLE-TEXT") ||
-		!strings.Contains(text, "Reviewer findings: 2 (high 1, medium 1)") {
-		t.Fatalf("unexpected text output:\n%s", text)
+	assertEvaluationOutput(t, text, false)
+	for _, want := range []string{
+		"# Revision needed", "## Automated checks: passed", "## Review", "REVIEW-SUMMARY-TEXT",
+		"- **responsibilities**: needs work. RUBRIC-RATIONALE-TEXT Where: app.py",
+		"1. **FINDING-TITLE-TEXT** (high priority)", "   - Risk: RISK-TEXT",
+		"Reviewer questions about the solution: 1.", "softpractice evaluation --directions",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text output lacks %q:\n%s", want, text)
+		}
 	}
 }
 
-func TestMachineReviewFeedbackDefaultsToSummary(t *testing.T) {
-	if machineReviewFeedback != reviewFeedbackSummary {
-		t.Fatalf("machineReviewFeedback = %q; reviewer directions must stay out of agent output by default", machineReviewFeedback)
+// assertEvaluationOutput checks what the evaluation output shows at each
+// detail: always what was found and why, the directions and next steps only
+// on request, and the reviewer's questions never.
+func assertEvaluationOutput(t *testing.T, output string, withDirections bool) {
+	t.Helper()
+	for _, shown := range []string{
+		"OBSERVATION-TEXT", "RISK-TEXT", "FINDING-TITLE-TEXT", "RUBRIC-RATIONALE-TEXT",
+		"REVIEW-SUMMARY-TEXT", "SCENARIO-TEXT", "EXPECTED-TEXT",
+	} {
+		if !strings.Contains(output, shown) {
+			t.Fatalf("output lacks %q:\n%s", shown, output)
+		}
 	}
-	raw, err := json.Marshal(reviseEvaluationBody(currentSubmissionID)["evaluation"])
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(output, "DEFENSE-QUESTION-TEXT") {
+		t.Fatalf("output contains a reviewer question:\n%s", output)
 	}
-	full, err := buildMachineFeedback(raw, reviewFeedbackFull)
-	if err != nil {
-		t.Fatal(err)
+	for _, direction := range []string{reviewerDirectionMarker, "NEXT-STEP-TEXT"} {
+		if strings.Contains(output, direction) != withDirections {
+			t.Fatalf("output contains %q = %t, want %t:\n%s", direction, !withDirections, withDirections, output)
+		}
 	}
-	if len(full.Review.Findings) != 2 || full.Review.Findings[0].Direction != reviewerDirectionMarker {
-		t.Fatalf("full detail lost the findings: %+v", full.Review)
+}
+
+func TestEvaluationDirectionsOnRequest(t *testing.T) {
+	if defaultReviewFeedback != feedbackWithoutDirections {
+		t.Fatalf("defaultReviewFeedback = %q; reviewer directions must stay out of output unless requested", defaultReviewFeedback)
+	}
+	server, _ := evaluationServer(t, currentSubmissionID, respondRevise)
+	useCases := newLearnerUseCases(savedTestClient(t, server.URL), "")
+	for _, format := range []string{"json", "text"} {
+		output, _, err := runEvaluation(t, useCases, "--id", currentSubmissionID, "--directions", "--format", format)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEvaluationOutput(t, output, true)
+		if format == "text" && (!strings.Contains(output, "   - Direction: "+reviewerDirectionMarker) ||
+			strings.Contains(output, "are not shown")) {
+			t.Fatalf("unexpected text output:\n%s", output)
+		}
 	}
 }
 
@@ -225,8 +255,7 @@ func TestEvaluationTimeoutReportsNotReady(t *testing.T) {
 	if err := decodeTestJSON([]byte(output), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Outcome != evaluationPending || payload.Terminal || payload.JobState != "leased" ||
-		payload.Evaluation != nil || payload.Feedback != nil {
+	if payload.Outcome != evaluationPending || payload.JobState != "leased" || payload.Result != nil {
 		t.Fatalf("unexpected payload: %+v", payload)
 	}
 
@@ -459,8 +488,7 @@ func jsonKeyPaths(t *testing.T, data []byte) []string {
 }
 
 // TestAgentJSONContractsAreStable pins the key sets of the agent-facing JSON
-// documents. A change here is a contract change: add keys only, and bump
-// contract_version when a key is removed, renamed, or changes meaning.
+// documents, so that a change to what an agent reads is a deliberate one.
 func TestAgentJSONContractsAreStable(t *testing.T) {
 	server, _ := evaluationServer(t, currentSubmissionID, respondRevise)
 	clock := &fakeClock{now: time.Unix(0, 0)}
@@ -470,21 +498,25 @@ func TestAgentJSONContractsAreStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"attempt", "contract_version", "evaluation", "evaluation.deterministic_status",
-		"evaluation.exercise_id", "evaluation.review", "evaluation.review.authoritative",
-		"evaluation.review.mode", "evaluation.review.status", "evaluation.review.verdict",
-		"evaluation.schema_version", "evaluation.status", "evaluation_job_id",
-		"feedback", "feedback.detail", "feedback.deterministic", "feedback.deterministic.checks",
-		"feedback.deterministic.checks[].has_counterexample", "feedback.deterministic.checks[].id",
-		"feedback.deterministic.checks[].kind", "feedback.deterministic.checks[].status",
-		"feedback.deterministic.checks[].summary", "feedback.deterministic.status",
-		"feedback.review", "feedback.review.authoritative", "feedback.review.blocking_uncertainty",
-		"feedback.review.findings_by_priority", "feedback.review.findings_by_priority.high",
-		"feedback.review.findings_by_priority.medium", "feedback.review.findings_count",
-		"feedback.review.mode", "feedback.review.rubric", "feedback.review.rubric[].criterion",
-		"feedback.review.rubric[].level", "feedback.review.status", "feedback.review.verdict",
-		"job_state", "kind", "max_attempts", "outcome", "result_path", "result_url",
-		"submission_id", "terminal", "updated_at",
+		"attempt", "evaluation_job_id", "job_state", "kind", "max_attempts", "outcome", "result",
+		"result.detail", "result.deterministic", "result.deterministic.checks",
+		"result.deterministic.checks[].counterexample",
+		"result.deterministic.checks[].counterexample.expected",
+		"result.deterministic.checks[].counterexample.input",
+		"result.deterministic.checks[].counterexample.scenario",
+		"result.deterministic.checks[].counterexample.title", "result.deterministic.checks[].id",
+		"result.deterministic.checks[].kind", "result.deterministic.checks[].status",
+		"result.deterministic.checks[].summary", "result.deterministic.status",
+		"result.directions_hidden", "result.exercise_id", "result.review", "result.review.authoritative",
+		"result.review.findings", "result.review.findings[].evidence_refs",
+		"result.review.findings[].observation", "result.review.findings[].priority",
+		"result.review.findings[].risk", "result.review.findings[].title", "result.review.mode",
+		"result.review.questions_count", "result.review.rubric", "result.review.rubric[].criterion",
+		"result.review.rubric[].evidence_refs", "result.review.rubric[].level",
+		"result.review.rubric[].rationale", "result.review.status", "result.review.summary",
+		"result.review.uncertainty", "result.review.uncertainty.blocking",
+		"result.review.uncertainty.reason", "result.review.verdict", "result.status", "result_url",
+		"submission_id", "updated_at",
 	}
 	if got := jsonKeyPaths(t, []byte(output)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("softpractice.evaluation keys changed:\ngot  %q\nwant %q", got, want)
@@ -497,7 +529,7 @@ func TestAgentJSONContractsAreStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantError := []string{
-		"contract_version", "error", "error.api_code", "error.code", "error.http_status",
+		"error", "error.api_code", "error.code", "error.http_status",
 		"error.message", "error.support_id", "kind",
 	}
 	if got := jsonKeyPaths(t, errorOutput.Bytes()); !reflect.DeepEqual(got, wantError) {
@@ -516,7 +548,7 @@ func TestAgentJSONContractsAreStable(t *testing.T) {
 		"assignment", "assignment.content_sha256", "assignment.estimated_minutes",
 		"assignment.exercise_id", "assignment.id", "assignment.instructions_markdown",
 		"assignment.kind", "assignment.project_setup", "assignment.title", "assignment.version",
-		"contract_version", "kind", "lesson_version_update", "lesson_version_update.assignment_id",
+		"kind", "lesson_version_update", "lesson_version_update.assignment_id",
 		"lesson_version_update.from_version", "lesson_version_update.to_version", "material",
 		"material.diagram", "material.diagram.nodes", "material.diagram.nodes[].text",
 		"material.diagram.nodes[].title", "material.diagram.text_alternative", "material.diagram.title",
