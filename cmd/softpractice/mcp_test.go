@@ -368,11 +368,16 @@ func TestMCPCommandWritesOnlyJSONRPCToStdout(t *testing.T) {
 		t.Fatalf("tools/list returned %d tools", len(tools))
 	}
 	// Outside a Git repository the error is a tool result, in Russian by
-	// default when no language is configured anywhere.
+	// default when no language is configured anywhere. The system locale
+	// still counts: Windows reports its display language.
+	wantAction := "Запустите"
+	if languageFromLocale(systemLocaleName()) == languageEnglish {
+		wantAction = "Start the MCP server"
+	}
 	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"task","arguments":{}}}`)
 	response := receive()["result"].(map[string]any)
 	text := response["content"].([]any)[0].(map[string]any)["text"].(string)
-	if response["isError"] != true || !strings.Contains(text, "not_git_repository") || !strings.Contains(text, "Запустите") {
+	if response["isError"] != true || !strings.Contains(text, "not_git_repository") || !strings.Contains(text, wantAction) {
 		t.Fatalf("task outside a project = %v", response)
 	}
 	_ = inputWriter.Close()
