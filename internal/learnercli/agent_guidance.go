@@ -24,8 +24,9 @@ type AgentGuidance struct {
 	Files             []AgentGuidanceFile `json:"files"`
 }
 
-// GetAgentGuidance leaves legacy status responses unchanged. Old servers may
-// lack the separate endpoint; authentication and transport failures still fail.
+// GetAgentGuidance is the compatibility endpoint for old starter archives and
+// restored revisions without root instructions. New starters need no request.
+// A missing endpoint is tolerated; authentication and transport failures fail.
 func (c *Client) GetAgentGuidance(ctx context.Context, assignmentID string, version int) (*AgentGuidance, error) {
 	if !projectIDPattern.MatchString(assignmentID) || version < 1 {
 		return nil, errors.New("invalid guidance assignment")

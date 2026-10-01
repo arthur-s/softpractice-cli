@@ -52,7 +52,7 @@ func TestRestoredProjectGuidancePreservesLessonAndSolution(t *testing.T) {
 	if !repo.Clean || solutionCommitContentSHA256(ctx, root, repo.CommitSHA) != solutionHash {
 		t.Fatal("guidance changed solution or left a dirty tree")
 	}
-	if ops, err := guidanceOperations(root, guidance); err != nil || len(ops) != 0 {
+	if ops, err := installMissingAgentGuidance(ctx, client, root, "pa-foundation-01", 1); err != nil || len(ops) != 0 {
 		t.Fatalf("guidance reinstall not idempotent: %+v, %v", ops, err)
 	}
 }
@@ -93,11 +93,46 @@ func TestGuidanceRejectsUnsafeDestinationsAndTamperedContent(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "AGENTS.md"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := guidanceOperations(root, guidance); err == nil {
+	if _, err := installMissingAgentGuidance(context.Background(), nil, root, "pa-foundation-01", 1); err == nil {
 		t.Fatal("instruction-shaped directory accepted")
 	}
 	guidance.Files[0].Content = "tampered"
 	if err := guidance.Validate(guidance.AssignmentID, guidance.AssignmentVersion); err == nil {
 		t.Fatal("tampered digest accepted")
+	}
+}
+
+func TestStarterInstructionsNeedNoSeparateRequest(t *testing.T) {
+	root := t.TempDir()
+	for _, file := range testAgentGuidance().Files {
+		if err := os.WriteFile(filepath.Join(root, file.Path), []byte(file.Content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("starter with instructions requested the guidance API")
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	if err := installStarterGuidance(context.Background(), savedTestClient(t, server.URL), root, "pa-foundation-01", 1); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyGuidanceOnlyAddsMissingFiles(t *testing.T) {
+	root := t.TempDir()
+	const original = "Project-specific instructions\n"
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeTestJSON(w, testAgentGuidance()) }))
+	defer server.Close()
+	installed, err := installMissingAgentGuidance(context.Background(), savedTestClient(t, server.URL), root, "pa-foundation-01", 1)
+	if err != nil || len(installed) != 1 || installed[0] != "CLAUDE.md" {
+		t.Fatalf("installed = %v, %v", installed, err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	if err != nil || string(body) != original {
+		t.Fatalf("existing instructions replaced: %v", err)
 	}
 }
