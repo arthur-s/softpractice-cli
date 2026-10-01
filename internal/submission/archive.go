@@ -92,6 +92,50 @@ func NormalizeZIP(sourcePath, outputDirectory string, limits ArchiveLimits) (_ N
 	return normalize(sourcePath, outputDirectory, limits, extractValidatedZIP)
 }
 
+// NormalizeSolutionTarGz excludes root agent instructions from new submissions.
+// The full-tree normalizers and materializers retain their original semantics
+// so stored revisions keep their immutable content identity.
+func NormalizeSolutionTarGz(sourcePath, outputDirectory string, limits ArchiveLimits) (NormalizedArchive, error) {
+	return normalize(sourcePath, outputDirectory, limits, solutionExtractor(extractValidatedTarGz))
+}
+
+func NormalizeSolutionZIP(sourcePath, outputDirectory string, limits ArchiveLimits) (NormalizedArchive, error) {
+	return normalize(sourcePath, outputDirectory, limits, solutionExtractor(extractValidatedZIP))
+}
+
+func solutionExtractor(extract archiveExtractor) archiveExtractor {
+	return func(sourcePath, staging string, limits ArchiveLimits) (archiveStats, error) {
+		stats, err := extract(sourcePath, staging, limits)
+		if err != nil {
+			return archiveStats{}, err
+		}
+		// Validate the entire input first, including types, duplicates and budgets.
+		// An instruction-shaped directory is not a file and is not discarded.
+		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+			path := filepath.Join(staging, name)
+			info, err := os.Stat(path)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return archiveStats{}, err
+			}
+			if !info.Mode().IsRegular() {
+				return archiveStats{}, fmt.Errorf("agent instruction %q must be a regular file", name)
+			}
+			if err := os.Remove(path); err != nil {
+				return archiveStats{}, err
+			}
+			stats.fileCount--
+			stats.uncompressedBytes -= info.Size()
+		}
+		if stats.fileCount == 0 {
+			return archiveStats{}, errors.New("submission contains no solution files")
+		}
+		return stats, nil
+	}
+}
+
 type archiveExtractor func(string, string, ArchiveLimits) (archiveStats, error)
 
 func normalize(sourcePath, outputDirectory string, limits ArchiveLimits, extract archiveExtractor) (_ NormalizedArchive, err error) {

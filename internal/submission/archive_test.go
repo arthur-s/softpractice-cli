@@ -20,6 +20,75 @@ type testEntry struct {
 	paxRecords map[string]string
 }
 
+func TestSolutionProjectionExcludesOnlyRootAgentInstructions(t *testing.T) {
+	root := t.TempDir()
+	entries := []testEntry{
+		{name: "solution.py", body: "answer = 42\n", typeflag: tar.TypeReg},
+		{name: "notes/AGENTS.md", body: "part of the project\n", typeflag: tar.TypeReg},
+	}
+	baseline := writeTestArchive(t, root, "baseline.tar.gz", entries)
+	withGuidance := writeTestArchive(t, root, "guidance.tar.gz", append(entries,
+		testEntry{name: "AGENTS.md", body: "independent instructions\n", typeflag: tar.TypeReg},
+		testEntry{name: "CLAUDE.md", body: "@AGENTS.md\n", typeflag: tar.TypeReg},
+	))
+	a, err := NormalizeSolutionTarGz(baseline, root, DefaultArchiveLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NormalizeSolutionTarGz(withGuidance, root, DefaultArchiveLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ContentSHA256 != b.ContentSHA256 || a.FileCount != 2 || b.FileCount != 2 || a.UncompressedBytes != b.UncompressedBytes {
+		t.Fatalf("guidance changed solution identity or stats: %#v / %#v", a, b)
+	}
+	legacy, err := NormalizeTarGz(withGuidance, root, DefaultArchiveLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ContentSHA256 == b.ContentSHA256 || legacy.FileCount != 4 {
+		t.Fatal("legacy full-tree identity changed")
+	}
+	stored, err := MaterializeTarGz(legacy.Path, root, DefaultArchiveLimits())
+	if err != nil || stored.ContentSHA256 != legacy.ContentSHA256 {
+		t.Fatalf("stored revision identity was not preserved: %#v, %v", stored, err)
+	}
+}
+
+func TestSolutionProjectionValidatesInstructionsBeforeExcludingThem(t *testing.T) {
+	for _, entry := range []testEntry{
+		{name: "AGENTS.md", typeflag: tar.TypeSymlink},
+		{name: "AGENTS.md", typeflag: tar.TypeDir},
+		{name: "CLAUDE.md", body: "only instructions", typeflag: tar.TypeReg},
+	} {
+		t.Run(entry.name+string(entry.typeflag), func(t *testing.T) {
+			root := t.TempDir()
+			archive := writeTestArchive(t, root, "input.tar.gz", []testEntry{entry})
+			if _, err := NormalizeSolutionTarGz(archive, root, DefaultArchiveLimits()); err == nil {
+				t.Fatal("unsafe or solution-free guidance upload accepted")
+			}
+		})
+	}
+}
+
+func TestSolutionZIPMatchesFilteredTarContent(t *testing.T) {
+	root := t.TempDir()
+	archive := writeTestArchive(t, root, "solution.tar.gz", []testEntry{
+		{name: "main.py", body: "value = 1\n", typeflag: tar.TypeReg},
+	})
+	zipArchive := writeTestZIP(t, root, "solution.zip", map[string]string{
+		"main.py": "value = 1\n", "AGENTS.md": "guidance", "CLAUDE.md": "@AGENTS.md\n",
+	})
+	a, err := NormalizeSolutionTarGz(archive, root, DefaultArchiveLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NormalizeSolutionZIP(zipArchive, root, DefaultArchiveLimits())
+	if err != nil || a.ContentSHA256 != b.ContentSHA256 || b.FileCount != 1 {
+		t.Fatalf("ZIP solution projection differs: %#v / %#v, %v", a, b, err)
+	}
+}
+
 func TestNormalizeTarGzIsDeterministic(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

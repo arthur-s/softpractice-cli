@@ -1070,74 +1070,117 @@ func submitTestClient(t *testing.T, workspaceID string) (*learnercli.Client, *in
 	return savedTestClient(t, server.URL), uploads, server.Close
 }
 
-func TestCourseUpdateStopsWhenWorktreeChangesDuringDownload(t *testing.T) {
-	workspaceID := uuid.NewString()
-	root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
-	updateRoot := t.TempDir()
-	contents := []byte("lesson two\n")
-	if err := os.WriteFile(filepath.Join(updateRoot, "lesson_two.py"), contents, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(contents)
-	var archive bytes.Buffer
-	metadata, err := starterbundle.Build(updateRoot, []starterbundle.File{{
-		Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:]),
-	}}, &archive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseRevisionID := uuid.NewString()
-	baseContentSHA256 := strings.Repeat("a", 64)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("Authorization") != "Bearer access-token" {
-			writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
-			return
-		}
-		if request.URL.Path != "/v1/workspaces/"+workspaceID+"/current-assignment/course-update/archive" {
-			http.NotFound(writer, request)
-			return
-		}
-		if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("student note\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		writer.Header().Set("Content-Type", "application/gzip")
-		writer.Header().Set("Content-Length", fmt.Sprint(metadata.Size))
-		writer.Header().Set("X-Softpractice-Course-Update-SHA256", metadata.SHA256)
-		writer.Header().Set("X-Softpractice-Course-Update-Ref", "test-update@1.0.0")
-		writer.Header().Set("X-Softpractice-Course-Update-Base-Revision-ID", baseRevisionID)
-		writer.Header().Set("X-Softpractice-Course-Update-Base-Content-SHA256", baseContentSHA256)
-		_, _ = writer.Write(archive.Bytes())
-	}))
-	defer server.Close()
-	client := savedTestClient(t, server.URL)
-	link, err := learnercli.LoadProjectLink(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	update := learnercli.CourseUpdate{
-		Ref: "test-update@1.0.0", FromAssignmentID: "pa-foundation-01", FromAssignmentVersion: 1,
-		ToAssignmentID: "pa-foundation-02", ToAssignmentVersion: 1,
-		BaseRevisionID: baseRevisionID, BaseContentSHA256: baseContentSHA256,
-		ArchiveSHA256: metadata.SHA256, ArchiveSize: metadata.Size,
-		Files: []struct {
-			Path   string `json:"path"`
-			SHA256 string `json:"sha256"`
-		}{{Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:])}},
-		Operations: []struct {
-			Kind string `json:"kind"`
-			Path string `json:"path"`
-		}{{Kind: "add", Path: "lesson_two.py"}},
-	}
-	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":1,"checks":[{"name":"test","executable":"git","args":["--version"],"timeout_seconds":30}]}`),
-		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz")
-	if err == nil || !strings.Contains(err.Error(), "working tree changed") {
-		t.Fatalf("update error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "lesson_two.py")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("course update file was applied despite concurrent edit: %v", err)
-	}
-	if contents, err := os.ReadFile(filepath.Join(root, "notes.txt")); err != nil || string(contents) != "student note\n" {
-		t.Fatalf("student file = %q, %v", contents, err)
+func TestCourseUpdateConcurrentChangesAndLegacyGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		commit    bool
+		wantError string
+	}{
+		{name: "uncommitted edit", wantError: "working tree changed"},
+		{name: "committed edit", commit: true, wantError: "HEAD changed"},
+		{name: "preserve common guidance"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceID := uuid.NewString()
+			root := createPinnedLinkedGitRepository(t, workspaceID, "pa-foundation-01", 1)
+			ignoreProjectLink(t, root)
+			commitLearnerWork(t, root, "AGENTS.md", "common practicum instructions\n")
+			updateRoot := t.TempDir()
+			contents := []byte("lesson two\n")
+			if err := os.WriteFile(filepath.Join(updateRoot, "lesson_two.py"), contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			legacy := []byte("old lesson instructions\n")
+			if err := os.WriteFile(filepath.Join(updateRoot, "AGENTS.md"), legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			legacyDigest := sha256.Sum256(legacy)
+			digest := sha256.Sum256(contents)
+			var archive bytes.Buffer
+			metadata, err := starterbundle.Build(updateRoot, []starterbundle.File{{
+				Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:]),
+			}, {Path: "AGENTS.md", SHA256: hex.EncodeToString(legacyDigest[:])}}, &archive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseRevisionID := uuid.NewString()
+			baseContentSHA256 := strings.Repeat("a", 64)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Header.Get("Authorization") != "Bearer access-token" {
+					writeTestAPIError(writer, http.StatusUnauthorized, "invalid_credentials")
+					return
+				}
+				if request.URL.Path != "/v1/workspaces/"+workspaceID+"/current-assignment/course-update/archive" {
+					http.NotFound(writer, request)
+					return
+				}
+				if tc.wantError != "" {
+					if tc.commit {
+						commitLearnerWork(t, root, "notes.txt", "student note\n")
+					} else if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("student note\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writer.Header().Set("Content-Type", "application/gzip")
+				writer.Header().Set("Content-Length", fmt.Sprint(metadata.Size))
+				writer.Header().Set("X-Softpractice-Course-Update-SHA256", metadata.SHA256)
+				writer.Header().Set("X-Softpractice-Course-Update-Ref", "test-update@1.0.0")
+				writer.Header().Set("X-Softpractice-Course-Update-Base-Revision-ID", baseRevisionID)
+				writer.Header().Set("X-Softpractice-Course-Update-Base-Content-SHA256", baseContentSHA256)
+				_, _ = writer.Write(archive.Bytes())
+			}))
+			defer server.Close()
+			client := savedTestClient(t, server.URL)
+			link, err := learnercli.LoadProjectLink(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			update := learnercli.CourseUpdate{
+				Ref: "test-update@1.0.0", FromAssignmentID: "pa-foundation-01", FromAssignmentVersion: 1,
+				ToAssignmentID: "pa-foundation-02", ToAssignmentVersion: 1,
+				BaseRevisionID: baseRevisionID, BaseContentSHA256: baseContentSHA256,
+				ArchiveSHA256: metadata.SHA256, ArchiveSize: metadata.Size,
+				Files: []struct {
+					Path   string `json:"path"`
+					SHA256 string `json:"sha256"`
+				}{{Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:])}, {Path: "AGENTS.md", SHA256: hex.EncodeToString(legacyDigest[:])}},
+				Operations: []struct {
+					Kind string `json:"kind"`
+					Path string `json:"path"`
+				}{{Kind: "add", Path: "lesson_two.py"}, {Kind: "replace", Path: "AGENTS.md"}},
+			}
+			head, err := gitOutput(context.Background(), root, "rev-parse", "HEAD")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":1,"checks":[{"name":"test","executable":"git","args":["--version"],"timeout_seconds":30}]}`),
+				"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz", strings.TrimSpace(string(head)))
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("update error = %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(root, "lesson_two.py")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("course update applied despite concurrent change: %v", err)
+				}
+				if data, err := os.ReadFile(filepath.Join(root, "notes.txt")); err != nil || string(data) != "student note\n" {
+					t.Fatalf("student file = %q, %v", data, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if data, err := os.ReadFile(filepath.Join(root, "lesson_two.py")); err != nil || !bytes.Equal(data, contents) {
+					t.Fatalf("lesson file = %q, %v", data, err)
+				}
+				changed, err := learnercli.LoadProjectLink(root)
+				if err != nil || changed.AssignmentID != update.ToAssignmentID {
+					t.Fatalf("lesson link = %+v, %v", changed, err)
+				}
+			}
+			if data, err := os.ReadFile(filepath.Join(root, "AGENTS.md")); err != nil || string(data) != "common practicum instructions\n" {
+				t.Fatalf("common guidance overwritten: %q, %v", data, err)
+			}
+		})
 	}
 }
 
@@ -1368,8 +1411,12 @@ func TestUpdateInvalidChecksLeavesProjectUnchanged(t *testing.T) {
 			Path string `json:"path"`
 		}{{Kind: "add", Path: "lesson_two.py"}},
 	}
+	head, err := gitOutput(context.Background(), root, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":2,"checks":[]}`),
-		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz")
+		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz", strings.TrimSpace(string(head)))
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("expected unsupported schema: %v", err)
 	}

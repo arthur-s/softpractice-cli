@@ -116,7 +116,7 @@ func prepareProjectUpdate(
 		return updatePlan{}, fmt.Errorf("verify local project content: %w", err)
 	}
 	defer os.Remove(normalized.Path)
-	if normalized.ContentSHA256 != update.BaseContentSHA256 {
+	if !matchesAcceptedSolution(ctx, repository, normalized.ContentSHA256, update.BaseContentSHA256) {
 		// A non-empty startDirectory means this is the staging copy driven by
 		// `project restore`, not a folder the learner is working in.
 		return updatePlan{}, courseUpdateMismatchError(ctx, repository, update, startDirectory != "")
@@ -127,6 +127,9 @@ func prepareProjectUpdate(
 	plan.course = update
 	plan.archivePath = "/v1/workspaces/" + link.WorkspaceID + "/current-assignment/course-update/archive?format=tar.gz"
 	for _, operation := range update.Operations {
+		if isAgentInstructionPath(operation.Path) {
+			continue
+		}
 		plan.Operations = append(plan.Operations, updateOperation{Kind: operation.Kind, Path: operation.Path})
 	}
 	return plan, nil
@@ -143,6 +146,9 @@ func prepareLessonVersionUpdate(ctx context.Context, client *learnercli.Client, 
 		return updatePlan{}, errors.New(text(ctx, "сервер вернул обновление для другого урока; проект не изменён", "server returned a course update for a different lesson; project was left unchanged"))
 	}
 	for _, operation := range update.Operations {
+		if isAgentInstructionPath(operation.Path) {
+			continue
+		}
 		if operation.Kind != "replace" {
 			return updatePlan{}, errors.New(text(ctx, "обновление урока может только заменять файлы урока; проект не изменён", "a lesson update may only replace lesson files; project was left unchanged"))
 		}
@@ -194,7 +200,7 @@ func applyProjectUpdate(ctx context.Context, client *learnercli.Client, plan upd
 		if len(plan.Operations) == 0 {
 			return refreshLessonVersion(ctx, root, link, plan.ToAssignmentVersion, plan.localChecks, output)
 		}
-		if err := downloadAndApplyCourseUpdate(ctx, client, root, link, plan.course, plan.localChecks, plan.archivePath); err != nil {
+		if err := downloadAndApplyCourseUpdate(ctx, client, root, link, plan.course, plan.localChecks, plan.archivePath, plan.HeadCommit); err != nil {
 			return err
 		}
 		replaced := make([]string, 0, len(plan.Operations))
@@ -207,7 +213,7 @@ func applyProjectUpdate(ctx context.Context, client *learnercli.Client, plan upd
 			link.AssignmentID, plan.FromAssignmentVersion, plan.ToAssignmentVersion, strings.Join(replaced, ", "))
 		return nil
 	case updateLessonTransition:
-		if err := downloadAndApplyCourseUpdate(ctx, client, root, plan.link, plan.course, plan.localChecks, plan.archivePath); err != nil {
+		if err := downloadAndApplyCourseUpdate(ctx, client, root, plan.link, plan.course, plan.localChecks, plan.archivePath, plan.HeadCommit); err != nil {
 			return err
 		}
 		fmt.Fprintf(output, text(ctx, "Проект курса обновлён в этой папке: %s\n", "Course project updated in place: %s\n"), root)

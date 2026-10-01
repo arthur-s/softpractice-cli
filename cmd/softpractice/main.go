@@ -383,6 +383,9 @@ func restoreRevisionProject(
 			return fmt.Errorf("update restored accepted revision: %w", err)
 		}
 	}
+	if err := restoreAgentGuidance(ctx, client, stage, workspace.Assignment.ID, workspace.Assignment.Version); err != nil {
+		return err
+	}
 	repository, finalLink, workspace, err := linkedWorkspace(ctx, client, stage, false)
 	if err != nil {
 		return fmt.Errorf("verify restored project: %w", err)
@@ -565,6 +568,9 @@ func downloadStarter(ctx context.Context, client *learnercli.Client, args []stri
 	if err := writeLocalChecks(stage, practicum.CurrentAssignment.LocalChecks); err != nil {
 		return err
 	}
+	if err := installStarterGuidance(ctx, client, stage, practicum.CurrentAssignment.ID, practicum.CurrentAssignment.Version); err != nil {
+		return err
+	}
 	if err := initializeStarterGit(ctx, stage, learnercli.ProjectLink{
 		SchemaVersion:     2,
 		WorkspaceID:       practicum.Workspace.ID,
@@ -662,6 +668,7 @@ func downloadAndApplyCourseUpdate(
 	update learnercli.CourseUpdate,
 	localChecks []byte,
 	archiveURLPath string,
+	expectedHead string,
 ) error {
 	archive, err := os.CreateTemp("", "softpractice-course-update-*.tar.gz")
 	if err != nil {
@@ -702,6 +709,13 @@ func downloadAndApplyCourseUpdate(
 	if !clean {
 		return errors.New("working tree changed while the course update was downloading; review and commit or stash those changes before retrying")
 	}
+	head, err := gitOutput(ctx, repositoryRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if expectedHead == "" || strings.TrimSpace(string(head)) != expectedHead {
+		return errors.New("HEAD changed while the course update was downloading; project was left unchanged, run the update again")
+	}
 	// Prepare both metadata files before touching the student's project, then
 	// apply them under the same rollback as the lesson files.
 	updatedLink := link
@@ -717,6 +731,20 @@ func downloadAndApplyCourseUpdate(
 	application := update
 	application.Files = slices.Clone(application.Files)
 	application.Operations = slices.Clone(application.Operations)
+	// Legacy archives carry lesson-specific instructions; preserve the root
+	// instruction installed with this project's starter instead.
+	application.Files = slices.DeleteFunc(application.Files, func(file struct {
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	}) bool {
+		return isAgentInstructionPath(file.Path)
+	})
+	application.Operations = slices.DeleteFunc(application.Operations, func(op struct {
+		Kind string `json:"kind"`
+		Path string `json:"path"`
+	}) bool {
+		return isAgentInstructionPath(op.Path)
+	})
 	for _, path := range []string{localchecks.RelativePath, ".softpractice/project.json"} {
 		for _, op := range update.Operations {
 			if op.Path == path {
@@ -746,11 +774,13 @@ func downloadAndApplyCourseUpdate(
 	if err := applyCourseUpdate(ctx, repositoryRoot, stage, application); err != nil {
 		return err
 	}
-	updatePaths := make([]string, 0, len(update.Operations))
-	for _, operation := range update.Operations {
-		updatePaths = append(updatePaths, operation.Path)
+	updatePaths := make([]string, 0, len(application.Operations))
+	for _, operation := range application.Operations {
+		if operation.Path != ".softpractice/project.json" {
+			updatePaths = append(updatePaths, operation.Path)
+		}
 	}
-	gitAddArguments := append([]string{"-C", repositoryRoot, "add", "--"}, updatePaths...)
+	gitAddArguments := append([]string{"-C", repositoryRoot, "add", "--force", "--"}, updatePaths...)
 	if gitOutput, err := exec.CommandContext(ctx, "git", gitAddArguments...).CombinedOutput(); err != nil {
 		return fmt.Errorf("stage course update: %v: %s", err, gitOutput)
 	}
@@ -1212,6 +1242,9 @@ func downloadStarterInto(
 		return fmt.Errorf("verify starter project: %w", errors.Join(extractErr, closeErr))
 	}
 	if err := writeLocalChecks(stage, workspace.Assignment.LocalChecks); err != nil {
+		return err
+	}
+	if err := installStarterGuidance(ctx, client, stage, assignmentID, assignmentVersion); err != nil {
 		return err
 	}
 	if err := initializeStarterGit(ctx, stage, learnercli.ProjectLink{

@@ -139,33 +139,50 @@ not ready yet, `4` the evaluation was superseded and will have no result.
 
 ## MCP server
 
-`softpractice mcp` is a local MCP server on stdio. It lets Claude Code, Codex,
-Claude Desktop, and other MCP clients work through the lesson with you, using
-the same operations as the commands above. Sign in first with
-`softpractice login`: the server never starts a sign-in itself.
+`softpractice mcp` connects a coding agent to your SoftPractice lesson:
+reading the task and material, running public checks, submitting a commit, and
+reading the evaluation. It is a local **stdio** MCP server: your MCP client
+starts the process and communicates with it. No server URL or listening port
+is needed.
 
-The server works on the lesson project in the directory the client starts it
-in. When the client starts it elsewhere, as Claude Desktop does, pass the
-project folder with `--project`.
+### Before connecting
 
-**Claude Code**, from the project folder:
+Install the CLI (see [Install](#install)), sign in, and open an existing lesson
+Git project, downloaded with `softpractice starter` or restored with
+`softpractice project restore`:
 
 ```bash
-claude mcp add softpractice -- softpractice mcp
+softpractice login
+cd /path/to/your/lesson-project
+softpractice status
 ```
 
-**Codex**, in `~/.codex/config.toml`:
+The MCP server uses the CLI's saved sign-in. It never starts a sign-in itself;
+there is no separate MCP OAuth login. Configure the launch command
+`softpractice mcp` in your client. The client starts it for you, so you do not
+need to leave it running in a terminal.
 
-```toml
-[mcp_servers.softpractice]
-command = "softpractice"
-args = ["mcp"]
-# Allow result and submit to wait for an evaluation.
-tool_timeout_sec = 180
+By default it works in the directory where the client starts it. Use
+`--project /absolute/path/to/your/lesson-project` to pin the folder, especially
+for desktop clients. When switching projects, change that path. If the client
+cannot find `softpractice` on `PATH`, use the executable's full path as the
+command. The client must run on the computer where the CLI and project exist.
+
+### Claude
+
+**Claude Code**, from the lesson project folder:
+
+```bash
+claude mcp add --transport stdio --scope local softpractice -- softpractice mcp
+claude mcp list
 ```
 
-**Claude Desktop**, in `claude_desktop_config.json`. Use the full path of the
-`softpractice` executable if the app does not find it on `PATH`:
+This registration is private to you and applies to this project. Start Claude
+Code in the same folder; use `/mcp` to check the connection. See the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+**Claude Desktop**, add this server entry to `claude_desktop_config.json`,
+keeping any servers already configured, then restart the app:
 
 ```json
 {
@@ -177,6 +194,44 @@ tool_timeout_sec = 180
   }
 }
 ```
+
+### Codex
+
+Register the server using the Codex CLI, replacing the project path:
+
+```bash
+codex mcp add softpractice -- softpractice mcp --project /path/to/your/lesson-project
+codex mcp list
+```
+
+Alternatively, add the following table to `~/.codex/config.toml`. If you used
+`codex mcp add`, edit its existing table instead of adding a duplicate:
+
+```toml
+[mcp_servers.softpractice]
+command = "softpractice"
+args = ["mcp", "--project", "/path/to/your/lesson-project"]
+# Allow time for local checks and evaluation polling.
+tool_timeout_sec = 180
+```
+
+The configuration is shared by local Codex clients on the same host (desktop,
+CLI, and IDE extension). For project-specific settings, use
+`.codex/config.toml` in a trusted project instead of the user-level file.
+Open the lesson folder in Codex and restart the client or its MCP connection
+after configuring it. In the CLI, `/mcp` shows active servers; `codex mcp list`
+shows registered servers. See the
+[official Codex MCP documentation](https://developers.openai.com/codex/mcp).
+
+Ask the agent: “Use the SoftPractice MCP server to show my lesson status and
+current task.” It should call `status` and `task`.
+
+### Using the server
+
+The server exposes nine tools. Ask the agent in ordinary language; it chooses
+the tool and passes structured arguments. These are MCP tool names, not slash
+commands. See the [MCP usage guide](docs/mcp.md) for example requests, exact
+parameters, the lesson workflow, and troubleshooting.
 
 | Tool | What it does |
 | --- | --- |

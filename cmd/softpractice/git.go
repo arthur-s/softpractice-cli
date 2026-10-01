@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/arthur-s/softpractice-cli/internal/submission"
 )
 
 var errNotGitRepository = errors.New("current directory is not a Git repository")
@@ -87,6 +89,9 @@ func readGitTree(repository *gitRepository, output []byte) error {
 		if err != nil {
 			return err
 		}
+		if isAgentInstructionPath(file.Path) {
+			continue
+		}
 		totalBytes += file.Size
 		repository.Files = append(repository.Files, file)
 	}
@@ -141,7 +146,7 @@ func createGitArchive(ctx context.Context, repository *gitRepository) error {
 		_ = os.Remove(repository.ArchivePath)
 		return err
 	}
-	if err := gitArchiveCommit(ctx, repository.Root, repository.CommitSHA, repository.ArchivePath); err != nil {
+	if err := gitSolutionArchiveCommit(ctx, repository.Root, repository.CommitSHA, repository.ArchivePath); err != nil {
 		_ = os.Remove(repository.ArchivePath)
 		return err
 	}
@@ -158,22 +163,33 @@ func createGitArchive(ctx context.Context, repository *gitRepository) error {
 	return nil
 }
 
+func isAgentInstructionPath(path string) bool {
+	return path == "AGENTS.md" || path == "CLAUDE.md"
+}
+
+// gitArchiveCommit retains full-tree identity for legacy accepted revisions.
 func gitArchiveCommit(ctx context.Context, root, commit, destination string) error {
-	command := exec.CommandContext(
-		ctx,
-		"git",
-		"-C",
-		root,
-		"archive",
-		"--format=tar.gz",
-		"--output",
-		destination,
-		commit,
-	)
+	command := exec.CommandContext(ctx, "git", "-C", root, "archive", "--format=tar.gz", "--output", destination, commit)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("create Git archive: %v: %s", err, output)
 	}
 	return nil
+}
+
+func gitSolutionArchiveCommit(ctx context.Context, root, commit, destination string) error {
+	if err := gitArchiveCommit(ctx, root, commit, destination); err != nil {
+		return err
+	}
+	projected, err := submission.NormalizeSolutionTarGz(destination, filepath.Dir(destination), submission.DefaultArchiveLimits())
+	if err != nil {
+		return fmt.Errorf("prepare solution archive: %w", err)
+	}
+	defer os.Remove(projected.Path)
+	// Remove the temporary full-tree archive first for Windows rename support.
+	if err := os.Remove(destination); err != nil {
+		return err
+	}
+	return os.Rename(projected.Path, destination)
 }
 
 func gitOutput(ctx context.Context, root string, arguments ...string) ([]byte, error) {

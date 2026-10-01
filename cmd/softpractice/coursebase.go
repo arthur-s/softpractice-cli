@@ -98,14 +98,39 @@ func findAcceptedBaseCommit(ctx context.Context, root, contentSHA256 string) (st
 		if ctx.Err() != nil {
 			return "", index
 		}
-		if commitContentSHA256(ctx, root, commit) == contentSHA256 {
+		if commitContentSHA256(ctx, root, commit) == contentSHA256 || solutionCommitContentSHA256(ctx, root, commit) == contentSHA256 {
 			return commit, index + 1
 		}
 	}
 	return "", len(commits)
 }
 
+// matchesAcceptedSolution supports both new solution-only hashes and stored
+// legacy full-tree hashes. A legacy ancestor can authorize the current tree
+// only when their solution projections are identical; code changes still fail.
+func matchesAcceptedSolution(ctx context.Context, repository gitRepository, solutionHash, acceptedHash string) bool {
+	if len(solutionHash) != 64 || len(acceptedHash) != 64 {
+		return false
+	}
+	if solutionHash == acceptedHash {
+		return true
+	}
+	if commitContentSHA256(ctx, repository.Root, repository.CommitSHA) == acceptedHash {
+		return true
+	}
+	accepted, _ := findAcceptedBaseCommit(ctx, repository.Root, acceptedHash)
+	return accepted != "" && solutionCommitContentSHA256(ctx, repository.Root, accepted) == solutionHash
+}
+
+func solutionCommitContentSHA256(ctx context.Context, root, commit string) string {
+	return archiveCommitContentSHA256(ctx, root, commit, gitSolutionArchiveCommit)
+}
+
 func commitContentSHA256(ctx context.Context, root, commit string) string {
+	return archiveCommitContentSHA256(ctx, root, commit, gitArchiveCommit)
+}
+
+func archiveCommitContentSHA256(ctx context.Context, root, commit string, archiveCommit func(context.Context, string, string, string) error) string {
 	archive, err := os.CreateTemp("", "softpractice-accepted-base-*.tar.gz")
 	if err != nil {
 		return ""
@@ -115,7 +140,7 @@ func commitContentSHA256(ctx context.Context, root, commit string) string {
 	if err := archive.Close(); err != nil {
 		return ""
 	}
-	if err := gitArchiveCommit(ctx, root, commit, archivePath); err != nil {
+	if err := archiveCommit(ctx, root, commit, archivePath); err != nil {
 		return ""
 	}
 	normalized, err := submission.NormalizeTarGz(archivePath, os.TempDir(), submission.DefaultArchiveLimits())
