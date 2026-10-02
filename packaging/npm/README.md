@@ -90,6 +90,7 @@ softpractice update
 | `softpractice update` | Apply the transition to the next lesson, or move to a newer version of the current lesson (replaces only lesson files, never yours; optional until the lesson ends) |
 | `softpractice open` | Open the task, material, or latest result in the browser |
 | `softpractice mcp` | Run the MCP server for Claude Code, Codex, Claude Desktop, and other agents |
+| `softpractice mcp setup codex-desktop` | Configure MCP for Codex Desktop without installing Codex CLI |
 | `softpractice project restore` | Restore a project from the latest usable revision |
 
 Run `softpractice help <command>` for detailed help.
@@ -137,46 +138,146 @@ softpractice result --wait --timeout 10m --json
 Exit codes: `0` done, `1` error, `2` invalid arguments, `3` the evaluation is
 not ready yet, `4` the evaluation was superseded and will have no result.
 
+## Agent instructions
+
+Every starter project already contains `AGENTS.md` and `CLAUDE.md` in its root
+folder, so Codex, Claude Code, and other coding agents pick up the project
+rules automatically. The files are tracked in Git, `softpractice update`
+never replaces them, and they are not part of your submission.
+
 ## MCP server
 
-`softpractice mcp` is a local MCP server on stdio. It lets Claude Code, Codex,
-Claude Desktop, and other MCP clients work through the lesson with you, using
-the same operations as the commands above. Sign in first with
-`softpractice login`: the server never starts a sign-in itself.
+`softpractice mcp` connects a coding agent to your SoftPractice lesson:
+reading the task and material, running public checks, submitting a commit, and
+reading the evaluation. It is a local **stdio** MCP server: your MCP client
+starts the process and communicates with it. No server URL or listening port
+is needed.
 
-The server works on the lesson project in the directory the client starts it
-in. When the client starts it elsewhere, as Claude Desktop does, pass the
-project folder with `--project`.
+### Before connecting
 
-**Claude Code**, from the project folder:
+Install the CLI (see [Install](#install)), sign in, and open an existing lesson
+Git project, downloaded with `softpractice starter` or restored with
+`softpractice project restore`:
 
 ```bash
-claude mcp add softpractice -- softpractice mcp
+softpractice login
+cd /path/to/your/lesson-project
+softpractice status
 ```
 
-**Codex**, in `~/.codex/config.toml`:
+The MCP server uses the CLI's saved sign-in. It never starts a sign-in itself;
+there is no separate MCP OAuth login. Configure the launch command
+`softpractice mcp` in your client. The client starts it for you, so you do not
+need to leave it running in a terminal.
 
-```toml
-[mcp_servers.softpractice]
-command = "softpractice"
-args = ["mcp"]
-# Allow result and submit to wait for an evaluation.
-tool_timeout_sec = 180
+By default it works in the directory where the client starts it. Use
+`--project /absolute/path/to/your/lesson-project` to pin the folder, especially
+for desktop clients. When switching projects, change that path. If the client
+cannot find `softpractice` on `PATH`, use the executable's full path as the
+command. The client must run on the computer where the CLI and project exist.
+
+### Claude Desktop
+
+From the lesson project folder:
+
+```bash
+softpractice mcp setup claude-desktop
 ```
 
-**Claude Desktop**, in `claude_desktop_config.json`. Use the full path of the
-`softpractice` executable if the app does not find it on `PATH`:
+The command adds the `softpractice` server to the Claude Desktop settings
+file, `claude_desktop_config.json`, with absolute paths to the program and the
+project: Claude Desktop does not see the `PATH` from your terminal profile and
+does not start the server in your project folder. Other servers and app
+settings in the file are kept; the previous file is saved next to it as
+`claude_desktop_config.json.bak`. On Windows, the command also finds the file
+that the Microsoft Store version of the app actually reads.
 
-```json
-{
-  "mcpServers": {
-    "softpractice": {
-      "command": "softpractice",
-      "args": ["mcp", "--project", "/path/to/your/lesson-project"]
-    }
-  }
-}
+Then quit Claude Desktop completely, not just its window, and start it again.
+The `softpractice` tools appear in the chat's tools menu. When you switch to
+another lesson project, run the command again in its folder.
+
+To configure the app manually, print the entry and add it to `mcpServers` in
+the file opened by **Settings → Developer → Edit Config**, keeping the servers
+already configured:
+
+```bash
+softpractice mcp setup claude-desktop --print
 ```
+
+### Claude Code
+
+From the lesson project folder:
+
+```bash
+claude mcp add --transport stdio --scope local softpractice -- softpractice mcp
+claude mcp list
+```
+
+This registration is private to you and applies to this project. Start Claude
+Code in the same folder; use `/mcp` to check the connection. See the
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+### Codex Desktop
+
+From the lesson project folder:
+
+```bash
+softpractice mcp setup codex-desktop
+```
+
+You do not need to install Codex CLI. The command adds the `softpractice`
+server to `~/.codex/config.toml` with absolute paths to the program and project
+and a tool timeout of 180 seconds. If `CODEX_HOME` is set, it uses
+`config.toml` in that folder. Other settings, servers, and their comments
+are kept; the previous file is saved next to it as `config.toml.bak`.
+Running setup again for the same project leaves the file unchanged.
+
+Restart Codex Desktop, open the lesson project folder, and check the
+`softpractice` server in the MCP settings. Ask the agent: “Use the
+SoftPractice MCP server to show my lesson status and current task.” It
+should call `status` and `task`. When switching to another lesson project,
+run the command again in its folder or pass
+`--project /absolute/path/to/your/lesson-project`.
+
+To configure the app manually, print the TOML entry:
+
+```bash
+softpractice mcp setup codex-desktop --print
+```
+
+Add it to `config.toml`, keeping the servers already configured. If
+`[mcp_servers.softpractice]` already exists, replace that table instead of
+adding a duplicate. Codex Desktop, CLI, and the IDE extension share these
+settings on the same host. Setup pins one project to the `softpractice`
+server for all these clients. A trusted project's `.codex/config.toml` can
+override user-level settings. See the
+[official Codex MCP documentation](https://developers.openai.com/codex/mcp).
+
+### Codex CLI
+
+If you already configured Codex Desktop with the command above, no further
+registration is needed. Start `codex` in the lesson folder; `/mcp` shows
+active servers.
+
+To configure using Codex CLI, replace the project path:
+
+```bash
+codex mcp add softpractice -- softpractice mcp --project /path/to/your/lesson-project
+codex mcp list
+```
+
+For local checks and evaluation polling, add `tool_timeout_sec = 180` to
+the generated `[mcp_servers.softpractice]` table in `~/.codex/config.toml`.
+If the client cannot find `softpractice`, use the executable's full path.
+You can also use `softpractice mcp setup codex-desktop`: it configures the
+same file.
+
+### Using the server
+
+The server exposes nine tools. Ask the agent in ordinary language; it chooses
+the tool and passes structured arguments. These are MCP tool names, not slash
+commands. See the [MCP usage guide](docs/mcp.md) for example requests, exact
+parameters, the lesson workflow, and troubleshooting.
 
 | Tool | What it does |
 | --- | --- |
