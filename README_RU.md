@@ -90,6 +90,7 @@ softpractice update
 | `softpractice update` | Применить переход к следующему уроку или перейти на новую версию текущего урока (заменяет только файлы урока, ваши файлы не трогает; до конца урока необязательно) |
 | `softpractice open` | Открыть задание, материал или последний результат в браузере |
 | `softpractice mcp` | Запустить MCP-сервер для Claude Code, Codex, Claude Desktop и других агентов |
+| `softpractice mcp setup codex-desktop` | Подключить MCP к Codex Desktop без установки Codex CLI |
 | `softpractice project restore` | Восстановить проект из последней подходящей ревизии |
 
 Подробную справку можно получить командой `softpractice help <команда>`.
@@ -176,9 +177,37 @@ MCP-сервер использует сохранённый вход CLI. Са�
 укажи полный путь к исполняемому файлу в поле команды. Клиент должен работать
 на компьютере, где установлены CLI и проект.
 
-### Claude
+### Claude Desktop
 
-**Claude Code**, из папки проекта урока:
+Из папки проекта урока:
+
+```bash
+softpractice mcp setup claude-desktop
+```
+
+Команда добавляет сервер `softpractice` в файл настроек Claude Desktop,
+`claude_desktop_config.json`, с абсолютными путями к программе и к проекту:
+Claude Desktop не видит `PATH` из профиля терминала и запускает сервер не в
+папке проекта. Остальные серверы и настройки приложения в файле сохраняются,
+прежний файл остаётся рядом как `claude_desktop_config.json.bak`. В Windows
+команда сама находит файл, который на самом деле читает версия приложения из
+Microsoft Store.
+
+Затем полностью закрой Claude Desktop (не только окно) и запусти снова.
+Инструменты `softpractice` появятся в меню инструментов чата. При переходе к
+другому проекту урока повтори команду в его папке.
+
+Чтобы настроить приложение вручную, выведи запись и добавь её в `mcpServers`
+файла, который открывает **Settings → Developer → Edit Config**, сохранив уже
+настроенные серверы:
+
+```bash
+softpractice mcp setup claude-desktop --print
+```
+
+### Claude Code
+
+Из папки проекта урока:
 
 ```bash
 claude mcp add --transport stdio --scope local softpractice -- softpractice mcp
@@ -189,50 +218,58 @@ claude mcp list
 в той же папке; команда `/mcp` покажет подключение. Подробнее — в
 [документации Claude Code по MCP](https://code.claude.com/docs/en/mcp).
 
-**Claude Desktop**: добавь запись сервера в `claude_desktop_config.json`,
-сохрани уже настроенные серверы и перезапусти приложение:
+### Codex Desktop
 
-```json
-{
-  "mcpServers": {
-    "softpractice": {
-      "command": "softpractice",
-      "args": ["mcp", "--project", "/path/to/your/lesson-project"]
-    }
-  }
-}
+Из папки проекта урока:
+
+```bash
+softpractice mcp setup codex-desktop
 ```
 
-### Codex
+Устанавливать Codex CLI для этого не нужно. Команда добавляет сервер
+`softpractice` в `~/.codex/config.toml` с абсолютными путями к программе и
+проекту, а также временем ожидания инструмента 180 секунд. Если задан
+`CODEX_HOME`, используется `config.toml` в этой папке. Остальные настройки,
+серверы и их комментарии сохраняются; прежний файл остаётся рядом как
+`config.toml.bak`. Повторная настройка того же проекта не меняет файл.
 
-Зарегистрируй сервер через Codex CLI, подставив путь к проекту:
+Перезапусти Codex Desktop, открой папку проекта урока и проверь сервер
+`softpractice` в настройках MCP. Попроси агента: «Через MCP SoftPractice
+покажи статус моего урока и текущее задание». Он должен вызвать `status`
+и `task`. При переходе к другому проекту урока повтори команду в его папке
+или укажи `--project /absolute/path/to/your/lesson-project`.
+
+Чтобы настроить приложение вручную, выведи TOML-запись:
+
+```bash
+softpractice mcp setup codex-desktop --print
+```
+
+Добавь её в `config.toml`, сохранив уже настроенные серверы. Если таблица
+`[mcp_servers.softpractice]` уже есть, замени её вместо добавления второй.
+Настройки общие для Codex Desktop, CLI и расширения IDE на одном компьютере.
+Настройка закрепляет один проект за сервером `softpractice` во всех этих
+клиентах. Проектная `.codex/config.toml` в доверенном проекте может
+переопределить пользовательские настройки. Подробнее — в
+[официальной документации Codex по MCP](https://developers.openai.com/codex/mcp).
+
+### Codex CLI
+
+Если уже настроил Codex Desktop командой выше, повторная регистрация
+не нужна. Запусти `codex` в папке проекта урока; `/mcp` покажет активные серверы.
+
+Для настройки через Codex CLI подставь путь к проекту:
 
 ```bash
 codex mcp add softpractice -- softpractice mcp --project /path/to/your/lesson-project
 codex mcp list
 ```
 
-Другой способ — добавить таблицу в `~/.codex/config.toml`. Если ты уже
-выполнил `codex mcp add`, редактируй созданную таблицу, а не добавляй вторую:
-
-```toml
-[mcp_servers.softpractice]
-command = "softpractice"
-args = ["mcp", "--project", "/path/to/your/lesson-project"]
-# Время на локальные проверки и ожидание результата.
-tool_timeout_sec = 180
-```
-
-Настройки общие для локальных клиентов Codex на одном компьютере:
-настольного приложения, CLI и расширения IDE. Чтобы задать настройки только
-для проекта, используй `.codex/config.toml` в доверенном проекте вместо
-пользовательского файла. Открой папку урока в Codex и после настройки
-перезапусти клиент или его MCP-подключение. В CLI команда `/mcp` показывает
-активные серверы, а `codex mcp list` — зарегистрированные. Подробнее — в
-[официальной документации Codex по MCP](https://developers.openai.com/codex/mcp).
-
-Попроси агента: «Через MCP SoftPractice покажи статус моего урока и текущее
-задание». Он должен вызвать `status` и `task`.
+Для локальных проверок и ожидания результата добавь
+`tool_timeout_sec = 180` в созданную таблицу `[mcp_servers.softpractice]`
+в `~/.codex/config.toml`. Если клиент не находит `softpractice`, укажи полный
+путь к исполняемому файлу. Можно также использовать
+`softpractice mcp setup codex-desktop`: она настраивает тот же файл.
 
 ### Использование сервера
 

@@ -243,6 +243,9 @@ func run(
 	case "open":
 		return openCurrent(ctx, client, "", remaining[1:], output, errorOutput)
 	case "mcp":
+		if len(remaining) > 1 && remaining[1] == "setup" {
+			return mcpSetupCommand(ctx, remaining[2:], output, errorOutput)
+		}
 		if *languageValue == "" && !languageChosen(config) {
 			// An MCP client often starts the server without a locale. The
 			// course is written in Russian, so its frame follows the content.

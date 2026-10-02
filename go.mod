@@ -5,8 +5,10 @@ go 1.26.3
 require (
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.46.0
 )
 
 require (

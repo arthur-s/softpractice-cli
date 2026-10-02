@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/term"
 
 	"github.com/arthur-s/softpractice-cli/internal/learnercli"
 )
@@ -93,9 +94,70 @@ func mcpCommand(
 	if err != nil {
 		return err
 	}
+	interactive := isTerminal(input)
+	if interactive {
+		printMCPBanner(ctx, client, directory, errorOutput)
+	}
 	// Standard output belongs to JSON-RPC: nothing else may write to it.
 	transport := &mcp.IOTransport{Reader: io.NopCloser(input), Writer: nopWriteCloser{output}}
-	return server.Run(ctx, transport)
+	err = server.Run(ctx, transport)
+	if interactive && (err == nil || errors.Is(err, context.Canceled)) {
+		fmt.Fprintln(errorOutput, text(ctx, "MCP-сервер остановлен.", "MCP server stopped."))
+		return nil
+	}
+	return err
+}
+
+// isTerminal reports whether a person typed the command rather than an MCP
+// client starting it with a pipe on standard input.
+func isTerminal(input io.Reader) bool {
+	file, ok := input.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(file.Fd()))
+}
+
+// printMCPBanner tells a person who started the server by hand that it is
+// meant for an agent, how to register it, and whether the agent's calls would
+// work from here. It runs only local checks and writes to standard error.
+func printMCPBanner(ctx context.Context, client *learnercli.Client, directory string, output io.Writer) {
+	fmt.Fprintf(output, text(ctx,
+		"SoftPractice MCP-сервер %s запущен и ждёт MCP-клиента на stdin.\n"+
+			"Эту команду запускает агент, а не человек. Подключи сервер к агенту из папки проекта урока:\n\n",
+		"SoftPractice MCP server %s is running and waiting for an MCP client on stdin.\n"+
+			"An agent starts this command, not a person. Register the server from the lesson project folder:\n\n",
+	), cliVersion)
+	repository, projectErr := inspectGitRepository(ctx, directory, false)
+	if projectErr == nil {
+		_, projectErr = learnercli.LoadProjectLink(repository.Root)
+	}
+	projectPath := "/path/to/your/lesson-project"
+	if projectErr == nil {
+		projectPath = repository.Root
+	}
+	fmt.Fprintln(output, "  Claude Desktop: softpractice mcp setup claude-desktop")
+	fmt.Fprintln(output, "  Codex Desktop:  softpractice mcp setup codex-desktop")
+	fmt.Fprintln(output, "  Claude Code:    claude mcp add --transport stdio --scope local softpractice -- softpractice mcp")
+	fmt.Fprintf(output, "  Codex CLI:      codex mcp add softpractice -- softpractice mcp --project %s\n\n", projectPath)
+	if projectErr == nil {
+		fmt.Fprintf(output, text(ctx, "Проект: %s\n", "Project: %s\n"), repository.Root)
+	} else {
+		location := directory
+		if location == "" {
+			location, _ = os.Getwd()
+		}
+		fmt.Fprintf(output, text(ctx,
+			"Внимание: в %s нет проекта SoftPractice (%v). Запусти сервер в папке урока или укажи --project.\n",
+			"Warning: %s is not a SoftPractice project (%v). Start the server in the lesson folder or pass --project.\n",
+		), location, projectErr)
+	}
+	if _, err := client.Store.Load(); errors.Is(err, learnercli.ErrLoginRequired) {
+		fmt.Fprintln(output, text(ctx, "Внимание: вход не выполнен. Сначала выполни softpractice login.", "Warning: not signed in. Run softpractice login first."))
+	} else if err != nil {
+		fmt.Fprintf(output, text(ctx, "Внимание: не удалось прочитать данные входа: %v\n", "Warning: could not read sign-in credentials: %v\n"), err)
+	}
+	fmt.Fprintln(output, text(ctx, "Подробнее: softpractice help mcp. Остановить: Ctrl+C.", "More: softpractice help mcp. Stop: Ctrl+C."))
 }
 
 type nopWriteCloser struct{ io.Writer }
@@ -112,11 +174,30 @@ func newMCPServer(ctx context.Context, useCases learnerUseCases, logOutput io.Wr
 		&mcp.Implementation{Name: "softpractice", Title: "SoftPractice", Version: cliVersion},
 		&mcp.ServerOptions{
 			Instructions: mcpInstructions,
-			Logger:       slog.New(slog.NewTextHandler(logOutput, &slog.HandlerOptions{Level: slog.LevelWarn})),
+			Logger:       slog.New(untilCanceled{ctx, slog.NewTextHandler(logOutput, &slog.HandlerOptions{Level: slog.LevelWarn})}),
 		},
 	)
 	s.register(server)
 	return server, nil
+}
+
+// untilCanceled silences the server log once the command is interrupted:
+// the SDK reports the cancellation itself as an error.
+type untilCanceled struct {
+	ctx context.Context
+	slog.Handler
+}
+
+func (h untilCanceled) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.ctx.Err() == nil && h.Handler.Enabled(ctx, level)
+}
+
+func (h untilCanceled) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return untilCanceled{h.ctx, h.Handler.WithAttrs(attrs)}
+}
+
+func (h untilCanceled) WithGroup(name string) slog.Handler {
+	return untilCanceled{h.ctx, h.Handler.WithGroup(name)}
 }
 
 func boolPointer(value bool) *bool { return &value }
