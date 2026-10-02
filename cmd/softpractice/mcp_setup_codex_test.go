@@ -70,7 +70,7 @@ func TestCodexSetupPreservesSettingsAndSwitchesProject(t *testing.T) {
 		t.Fatalf("switched args = %#v", server["args"])
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("permissions: %v, %v", info, err)
 	}
 }

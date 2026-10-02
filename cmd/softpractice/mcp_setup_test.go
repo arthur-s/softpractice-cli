@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -57,8 +58,8 @@ func TestAddMCPServerToConfigKeepsOtherSettings(t *testing.T) {
 		strings.Join(config.MCPServers["softpractice"].Args, " ") != "mcp --project /work/lesson" {
 		t.Fatalf("config = %s", data)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, %v", info.Mode(), err)
+	if info, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+		t.Fatalf("permissions: %v, %v", info, err)
 	}
 
 	// A second run with the same entry changes nothing.

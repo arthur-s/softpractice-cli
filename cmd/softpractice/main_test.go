@@ -1097,9 +1097,10 @@ func TestCourseUpdateConcurrentChangesAndLegacyGuidance(t *testing.T) {
 			legacyDigest := sha256.Sum256(legacy)
 			digest := sha256.Sum256(contents)
 			var archive bytes.Buffer
-			metadata, err := starterbundle.Build(updateRoot, []starterbundle.File{{
-				Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:]),
-			}, {Path: "AGENTS.md", SHA256: hex.EncodeToString(legacyDigest[:])}}, &archive)
+			metadata, err := starterbundle.Build(updateRoot, []starterbundle.File{
+				{Path: "AGENTS.md", SHA256: hex.EncodeToString(legacyDigest[:])},
+				{Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:])},
+			}, &archive)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1143,7 +1144,7 @@ func TestCourseUpdateConcurrentChangesAndLegacyGuidance(t *testing.T) {
 				Files: []struct {
 					Path   string `json:"path"`
 					SHA256 string `json:"sha256"`
-				}{{Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:])}, {Path: "AGENTS.md", SHA256: hex.EncodeToString(legacyDigest[:])}},
+				}{{Path: "AGENTS.md", SHA256: hex.EncodeToString(legacyDigest[:])}, {Path: "lesson_two.py", SHA256: hex.EncodeToString(digest[:])}},
 				Operations: []struct {
 					Kind string `json:"kind"`
 					Path string `json:"path"`
