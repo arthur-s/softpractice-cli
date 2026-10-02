@@ -137,6 +137,13 @@ softpractice result --wait --timeout 10m --json
 Exit codes: `0` done, `1` error, `2` invalid arguments, `3` the evaluation is
 not ready yet, `4` the evaluation was superseded and will have no result.
 
+## Agent instructions
+
+Every starter project already contains `AGENTS.md` and `CLAUDE.md` in its root
+folder, so Codex, Claude Code, and other coding agents pick up the project
+rules automatically. The files are tracked in Git, `softpractice update`
+never replaces them, and they are not part of your submission.
+
 ## MCP server
 
 `softpractice mcp` connects a coding agent to your SoftPractice lesson:

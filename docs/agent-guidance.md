@@ -1,15 +1,16 @@
 # Project agent instructions
 
-Root `AGENTS.md` and `CLAUDE.md` guide the local assistant. New starter
-archives carry both files, covered by the starter manifest and archive hash.
-They are tracked in the learner Git repository and preserved across lesson
-updates. `CLAUDE.md` imports `@AGENTS.md`.
+Every starter project includes root `AGENTS.md` and `CLAUDE.md` for the local
+assistant; `CLAUDE.md` imports `@AGENTS.md`. Learners do not download them
+separately. Both files are part of the starter archive, covered by its
+manifest and archive hash, tracked in the learner Git repository, and
+preserved across lesson updates.
 
-When both regular files are present, starter creation makes no separate
-guidance request. The server repository keeps one common source per practicum
-and copies it into its entry and independent transfer starter sources.
-Published archive bytes and manifests are immutable; source changes require
-new starter releases. The source migration does not itself publish those releases.
+When both regular files are present after extraction, starter creation makes
+no separate guidance request. The server repository keeps one common source
+per practicum and copies it into its entry and independent transfer starter
+sources. Published archive bytes and manifests are immutable; source changes
+require new starter releases.
 
 ## Compatibility and restore
 
