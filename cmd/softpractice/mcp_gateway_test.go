@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -142,11 +141,7 @@ func TestMCPGatewayStdioInitializesWithoutLesson(t *testing.T) {
 	t.Cleanup(func() { _ = writer.Close(); _ = output.Close() })
 	done := make(chan error, 1)
 	go func() {
-		if runtime.GOOS == "darwin" {
-			done <- mcpCommand(ctx, nil, []string{"connect"}, input, outputWriter, io.Discard)
-		} else {
-			done <- runMCPGateway(ctx, nil, input, outputWriter, io.Discard)
-		}
+		done <- mcpCommand(ctx, nil, []string{"connect"}, input, outputWriter, io.Discard)
 		_ = outputWriter.Close()
 	}()
 	scanner := bufio.NewScanner(output)
@@ -173,6 +168,16 @@ func TestMCPGatewayStdioInitializesWithoutLesson(t *testing.T) {
 	send(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if tools := read()["result"].(map[string]any)["tools"].([]any); len(tools) != 9 {
 		t.Fatalf("tools: %d", len(tools))
+	}
+	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"task","arguments":{}}}`)
+	failure := read()["result"].(map[string]any)
+	if failure["isError"] != true || !strings.Contains(failure["content"].([]any)[0].(map[string]any)["text"].(string), "lesson_server_not_running") {
+		t.Fatalf("offline task: %+v", failure)
+	}
+	// An offline tool call must not terminate the Desktop-owned connection.
+	send(`{"jsonrpc":"2.0","id":4,"method":"tools/list"}`)
+	if tools := read()["result"].(map[string]any)["tools"].([]any); len(tools) != 9 {
+		t.Fatalf("tools after offline call: %d", len(tools))
 	}
 	_ = writer.Close()
 	select {

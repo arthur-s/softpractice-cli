@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -74,10 +73,7 @@ func mcpCommand(
 		if len(args) != 1 {
 			return usage(ctx, "использование: softpractice mcp connect", "usage: softpractice mcp connect")
 		}
-		if runtime.GOOS == "darwin" {
-			return runMCPGateway(ctx, client, input, output, errorOutput)
-		}
-		return connectLocalMCP(ctx, input, output)
+		return runMCPGateway(ctx, client, input, output, errorOutput)
 	}
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
