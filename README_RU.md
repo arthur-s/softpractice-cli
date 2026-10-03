@@ -224,25 +224,10 @@ codex mcp add softpractice -- softpractice mcp connect
 Подробнее — в [документации Claude Code](https://code.claude.com/docs/en/mcp)
 и [документации Codex](https://developers.openai.com/codex/mcp).
 
-### Прямой stdio-режим и прежние настройки
-
-При запуске с stdin через pipe сохраняется прямой stdio-режим, поэтому прежние
-настройки клиентов продолжают работать. Его можно выбрать явно через `--stdio`:
-
-```bash
-claude mcp add --transport stdio --scope local softpractice -- softpractice mcp --stdio
-codex mcp add softpractice -- softpractice mcp --stdio --project /path/to/your/lesson-project
-```
-
-В этом режиме клиент общается с сервером через stdin/stdout; отдельный
-терминал с сервером не нужен. Проект определяется рабочей папкой клиента
-или флагом `--project`. Desktop-настройка через `setup --project DIR` также
-сохраняет прямой режим с привязкой к указанному проекту.
-
-После обновления прежней версии CLI повтори Desktop-настройку без
-`--project`, чтобы перейти на ручной запуск сервера. Для фонового запуска
-или перенаправленного stdin укажи `softpractice mcp --listen [--project DIR]`.
-Флаги `--stdio` и `--listen` нельзя использовать вместе.
+`softpractice mcp` всегда запускает локальный сервер, в том числе при
+перенаправленном stdin и фоновом запуске. Проект выбирается только при запуске
+сервера. `setup` настраивает подключение к единственному работающему серверу
+и не принимает `--project`.
 
 ### Использование сервера
 

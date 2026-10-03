@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"golang.org/x/term"
 
 	"github.com/arthur-s/softpractice-cli/internal/learnercli"
 )
@@ -79,23 +78,12 @@ func mcpCommand(
 	flags := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
 	project := flags.String("project", "", "project folder; defaults to the current directory")
-	stdio := flags.Bool("stdio", false, "serve directly over stdin/stdout instead of listening locally")
-	listen := flags.Bool("listen", false, "listen locally even when stdin is not a terminal")
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return usage(ctx, "использование: softpractice mcp [--project DIR] [--stdio|--listen]", "usage: softpractice mcp [--project DIR] [--stdio|--listen]")
+		return usage(ctx, "использование: softpractice mcp [--project DIR]", "usage: softpractice mcp [--project DIR]")
 	}
-	if *stdio && *listen {
-		return usage(ctx, "--stdio и --listen нельзя использовать вместе", "--stdio and --listen cannot be used together")
-	}
-	// Existing MCP configurations launch us with a pipe on stdin. Keep their
-	// direct stdio behavior while terminal launches use the local server.
-	if !*listen && !isTerminal(input) {
-		*stdio = true
-	}
-
 	directory := strings.TrimSpace(*project)
 	if directory != "" {
 		absolute, err := filepath.Abs(directory)
@@ -107,89 +95,37 @@ func mcpCommand(
 		}
 		directory = absolute
 	}
-	if !*stdio {
-		root, err := mcpProjectRoot(ctx, directory)
-		if err != nil {
-			return err
-		}
-		directory = root
-	}
-	server, err := newMCPServer(ctx, newLearnerUseCases(client, directory), errorOutput)
+	root, err := mcpProjectRoot(ctx, directory)
 	if err != nil {
 		return err
 	}
-	if !*stdio {
-		return serveLocalMCP(ctx, server, directory, errorOutput)
+
+	server, err := newMCPServer(ctx, newLearnerUseCases(client, root), errorOutput)
+	if err != nil {
+		return err
 	}
-	interactive := isTerminal(input)
-	if interactive {
-		printMCPBanner(ctx, client, directory, errorOutput)
-	}
-	// Standard output belongs to JSON-RPC: nothing else may write to it.
-	transport := &mcp.IOTransport{Reader: io.NopCloser(input), Writer: nopWriteCloser{output}}
-	err = server.Run(ctx, transport)
-	if interactive && (err == nil || errors.Is(err, context.Canceled)) {
-		fmt.Fprintln(errorOutput, text(ctx, "MCP-сервер остановлен.", "MCP server stopped."))
-		return nil
-	}
-	return err
+	return serveLocalMCP(ctx, server, root, errorOutput)
 }
 
-// isTerminal reports whether a person typed the command rather than an MCP
-// client starting it with a pipe on standard input.
-func isTerminal(input io.Reader) bool {
-	file, ok := input.(*os.File)
-	if !ok {
-		return false
-	}
-	return term.IsTerminal(int(file.Fd()))
-}
-
-// printMCPBanner tells a person who started the server by hand that it is
-// meant for an agent, how to register it, and whether the agent's calls would
-// work from here. It runs only local checks and writes to standard error.
-func printMCPBanner(ctx context.Context, client *learnercli.Client, directory string, output io.Writer) {
-	fmt.Fprintf(output, text(ctx,
-		"SoftPractice MCP-сервер %s запущен и ждёт MCP-клиента на stdin.\n"+
-			"Эту команду запускает агент, а не человек. Подключи сервер к агенту из любой папки:\n\n",
-		"SoftPractice MCP server %s is running and waiting for an MCP client on stdin.\n"+
-			"An agent starts this command, not a person. Register the server from any folder:\n\n",
-	), cliVersion)
-	repository, projectErr := inspectGitRepository(ctx, directory, false)
-	if projectErr == nil {
-		_, projectErr = learnercli.LoadProjectLink(repository.Root)
-	}
-	projectPath := "/path/to/your/lesson-project"
-	if projectErr == nil {
-		projectPath = repository.Root
-	}
-	fmt.Fprintln(output, "  Claude Desktop: softpractice mcp setup claude-desktop")
-	fmt.Fprintln(output, "  Codex Desktop:  softpractice mcp setup codex-desktop")
-	fmt.Fprintln(output, "  Claude Code:    claude mcp add --transport stdio --scope local softpractice -- softpractice mcp --stdio")
-	fmt.Fprintf(output, "  Codex CLI:      codex mcp add softpractice -- softpractice mcp --stdio --project %s\n\n", projectPath)
-	if projectErr == nil {
-		fmt.Fprintf(output, text(ctx, "Проект: %s\n", "Project: %s\n"), repository.Root)
-	} else {
-		location := directory
-		if location == "" {
-			location, _ = os.Getwd()
+func mcpProjectRoot(ctx context.Context, directory string) (string, error) {
+	if directory != "" {
+		absolute, err := filepath.Abs(directory)
+		if err != nil {
+			return "", err
 		}
-		fmt.Fprintf(output, text(ctx,
-			"Внимание: в %s нет проекта SoftPractice (%v). Запусти сервер в папке урока или укажи --project.\n",
-			"Warning: %s is not a SoftPractice project (%v). Start the server in the lesson folder or pass --project.\n",
-		), location, projectErr)
+		directory = absolute
 	}
-	if _, err := client.Store.Load(); errors.Is(err, learnercli.ErrLoginRequired) {
-		fmt.Fprintln(output, text(ctx, "Внимание: вход не выполнен. Сначала выполни softpractice login.", "Warning: not signed in. Run softpractice login first."))
-	} else if err != nil {
-		fmt.Fprintf(output, text(ctx, "Внимание: не удалось прочитать данные входа: %v\n", "Warning: could not read sign-in credentials: %v\n"), err)
+	repository, err := inspectGitRepository(ctx, directory, false)
+	if err == nil {
+		_, err = learnercli.LoadProjectLink(repository.Root)
 	}
-	fmt.Fprintln(output, text(ctx, "Подробнее: softpractice help mcp. Остановить: Ctrl+C.", "More: softpractice help mcp. Stop: Ctrl+C."))
+	if err != nil {
+		return "", fmt.Errorf(text(ctx,
+			"запусти сервер в папке проекта урока или укажи --project: %w",
+			"start the server in the lesson project folder or pass --project: %w"), err)
+	}
+	return repository.Root, nil
 }
-
-type nopWriteCloser struct{ io.Writer }
-
-func (nopWriteCloser) Close() error { return nil }
 
 func newMCPServer(ctx context.Context, useCases learnerUseCases, logOutput io.Writer) (*mcp.Server, error) {
 	key := make([]byte, 32)

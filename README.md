@@ -222,25 +222,9 @@ If the client cannot find `softpractice`, use the executable's full path.
 See the [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp)
 and [Codex MCP documentation](https://developers.openai.com/codex/mcp).
 
-### Direct stdio mode and existing configurations
-
-Launches with piped stdin retain direct stdio behavior, so existing client
-configurations keep working. You can select that mode explicitly with `--stdio`:
-
-```bash
-claude mcp add --transport stdio --scope local softpractice -- softpractice mcp --stdio
-codex mcp add softpractice -- softpractice mcp --stdio --project /path/to/your/lesson-project
-```
-
-In this mode, the client communicates directly over stdin/stdout and no
-separate terminal server is needed. The current directory selects the project
-unless `--project` is given. Desktop setup with `--project DIR` also registers
-this direct mode and pins that project.
-
-After updating from the previous CLI version, rerun desktop setup without
-`--project` to use manual server startup. For background or redirected terminal
-launches, use `softpractice mcp --listen [--project DIR]` to force local listening.
-`--stdio` and `--listen` cannot be used together.
+`softpractice mcp` always starts the local server, including with redirected
+stdin or in the background. Only server startup selects the project. Setup
+connects the client to the single running server and does not accept `--project`.
 
 ### Using the server
 

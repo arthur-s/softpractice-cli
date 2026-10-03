@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const testDesktopEntry = `{"command":"/opt/softpractice","args":["mcp","--project","/work/lesson"]}`
+const testDesktopEntry = `{"command":"/opt/softpractice","args":["mcp","connect"]}`
 
 // Claude Desktop keeps its own preferences in the same file: setup changes
 // only mcpServers.softpractice and keeps every other member in its place.
@@ -55,7 +55,7 @@ func TestAddMCPServerToConfigKeepsOtherSettings(t *testing.T) {
 	}
 	if config.Preferences["sidebarMode"] != "chat" || config.MCPServers["other"].Command != "x" ||
 		config.MCPServers["softpractice"].Command != "/opt/softpractice" ||
-		strings.Join(config.MCPServers["softpractice"].Args, " ") != "mcp --project /work/lesson" {
+		strings.Join(config.MCPServers["softpractice"].Args, " ") != "mcp connect" {
 		t.Fatalf("config = %s", data)
 	}
 	if info, err := os.Stat(path); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {

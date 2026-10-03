@@ -29,10 +29,10 @@ func TestLocalMCPBridgeAndProjectSwitch(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var banner lockedBuffer
 		done := make(chan error, 1)
-		args := []string{"--listen", "--project", root}
+		args := []string{"--project", root}
 		if attempt == 0 {
 			t.Chdir(root)
-			args = []string{"--listen"}
+			args = nil
 		} else {
 			t.Chdir(t.TempDir())
 		}
@@ -69,7 +69,7 @@ func TestLocalMCPBridgeAndProjectSwitch(t *testing.T) {
 			t.Fatalf("project missing: %s", banner.String())
 		}
 		// Starting another project cannot replace the active server's secret.
-		if err := mcpCommand(ctx, nil, []string{"--listen", "--project", root}, strings.NewReader(""), io.Discard, io.Discard); err == nil {
+		if err := mcpCommand(ctx, nil, []string{"--project", createLinkedGitRepository(t, uuid.NewString())}, strings.NewReader(""), io.Discard, io.Discard); err == nil {
 			cancel()
 			t.Fatal("second server started")
 		}
@@ -152,12 +152,33 @@ func TestLocalMCPBridgeAndProjectSwitch(t *testing.T) {
 func TestLocalMCPRejectsMissingProjectAndExplainsOfflineServer(t *testing.T) {
 	t.Setenv(configDirectoryEnv, t.TempDir())
 	var output bytes.Buffer
-	err := mcpCommand(context.Background(), nil, []string{"--listen", "--project", t.TempDir()}, strings.NewReader(""), &output, io.Discard)
+	err := mcpCommand(context.Background(), nil, []string{"--project", t.TempDir()}, strings.NewReader(""), &output, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "--project") || output.Len() != 0 {
 		t.Fatalf("missing project: %v, stdout=%s", err, output.String())
 	}
 	err = connectLocalMCP(context.Background(), strings.NewReader(""), &output)
 	if err == nil || !strings.Contains(err.Error(), "softpractice mcp --project DIR") || output.Len() != 0 {
 		t.Fatalf("offline bridge: %v, stdout=%s", err, output.String())
+	}
+}
+
+func TestMCPRejectsRemovedTransportOptions(t *testing.T) {
+	for _, option := range []string{"--stdio", "--listen"} {
+		t.Run(option, func(t *testing.T) {
+			var output bytes.Buffer
+			err := mcpCommand(context.Background(), nil, []string{option}, strings.NewReader(""), &output, io.Discard)
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("removed option: err=%v, stdout=%s", err, output.String())
+			}
+		})
+	}
+	for _, client := range []string{"claude-desktop", "codex-desktop"} {
+		t.Run(client, func(t *testing.T) {
+			var output bytes.Buffer
+			err := mcpSetupCommand(context.Background(), []string{client, "--project", t.TempDir(), "--print"}, &output, io.Discard)
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("project-bound setup: err=%v, stdout=%s", err, output.String())
+			}
+		})
 	}
 }

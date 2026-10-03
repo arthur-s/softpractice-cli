@@ -162,27 +162,3 @@ func connectLocalMCP(ctx context.Context, input io.Reader, output io.Writer) err
 		return unavailable(errors.Join(err, io.EOF))
 	}
 }
-
-func mcpSetupArgs(root string) []string {
-	if root == "" {
-		return []string{"mcp", "connect"}
-	}
-	return []string{"mcp", "--stdio", "--project", root}
-}
-
-func printMCPSetupTarget(ctx context.Context, executable, root string, output io.Writer) {
-	fmt.Fprintf(output, text(ctx, "  Программа: %s\n", "  Program: %s\n"), executable)
-	if root != "" {
-		fmt.Fprintf(output, text(ctx, "  Проект: %s\n", "  Project: %s\n"), root)
-	}
-}
-
-func printMCPSetupNextStep(ctx context.Context, root string, output io.Writer) {
-	if root != "" {
-		fmt.Fprintln(output, text(ctx, "Клиент сам запускает сервер для указанного проекта. Чтобы перейти на ручной запуск, повтори setup без --project.", "The client starts the server for the specified project. To switch to manual startup, rerun setup without --project."))
-		return
-	}
-	fmt.Fprintln(output, text(ctx,
-		"Запусти softpractice mcp в папке урока или softpractice mcp --project DIR и оставь терминал открытым. При смене проекта останови сервер, запусти его в новой папке и переподключи MCP-клиент. Повторять setup не нужно.",
-		"Run softpractice mcp in the lesson folder or softpractice mcp --project DIR and keep the terminal open. To switch projects, stop the server, start it in the new folder, and reconnect the MCP client. Setup does not need to be repeated."))
-}

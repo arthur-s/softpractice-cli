@@ -10,8 +10,8 @@ Setup (`softpractice mcp setup ...`) works from any folder. Then run
 `softpractice mcp` in the lesson folder or pass `--project DIR`, and keep the
 terminal open. The client connects through `softpractice mcp connect`. To
 switch projects, stop the server, start it in the other folder, and reconnect
-the client; setup does not need to be repeated. Clients can also start a
-direct server with `--stdio`.
+the client; setup does not need to be repeated. Only one lesson server can
+run at a time. Server startup always uses local TCP, regardless of stdin.
 
 ## What to ask the agent
 

@@ -28,17 +28,17 @@ func codexConfigPath() (string, error) {
 	return filepath.Abs(filepath.Join(directory, "config.toml"))
 }
 
-func codexServerEntry(executable, root string) map[string]any {
+func codexServerEntry(executable string) map[string]any {
 	return map[string]any{
 		"command":          executable,
-		"args":             mcpSetupArgs(root),
+		"args":             []string{"mcp", "connect"},
 		"tool_timeout_sec": int64(180),
 		"enabled":          true,
 	}
 }
 
-func setupCodexDesktop(ctx context.Context, executable, root string, printOnly bool, output io.Writer) error {
-	entry := codexServerEntry(executable, root)
+func setupCodexDesktop(ctx context.Context, executable string, printOnly bool, output io.Writer) error {
+	entry := codexServerEntry(executable)
 	if printOnly {
 		document, err := toml.Marshal(map[string]any{"mcp_servers": map[string]any{mcpServerName: entry}})
 		if err != nil {
@@ -60,7 +60,7 @@ func setupCodexDesktop(ctx context.Context, executable, root string, printOnly b
 	} else {
 		fmt.Fprintf(output, text(ctx, "Codex Desktop уже настроен: %s\n", "Codex Desktop is already configured: %s\n"), path)
 	}
-	printMCPSetupTarget(ctx, executable, root, output)
+	printMCPSetupTarget(ctx, executable, output)
 	if backup != "" {
 		fmt.Fprintf(output, text(ctx, "Прежний файл сохранён: %s\n", "The previous file is saved as %s\n"), backup)
 	}
@@ -69,7 +69,7 @@ func setupCodexDesktop(ctx context.Context, executable, root string, printOnly b
 			"\nПерезапусти Codex Desktop и открой папку проекта урока. Проверь сервер softpractice в настройках MCP и попроси агента показать статус урока и задание.",
 			"\nRestart Codex Desktop and open the lesson project folder. Check the softpractice server in the MCP settings and ask the agent to show the lesson status and task."))
 	}
-	printMCPSetupNextStep(ctx, root, output)
+	printMCPSetupNextStep(ctx, output)
 	return nil
 }
 

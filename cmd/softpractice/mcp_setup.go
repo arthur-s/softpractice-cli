@@ -13,8 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/arthur-s/softpractice-cli/internal/learnercli"
 )
 
 const mcpServerName = "softpractice"
@@ -23,15 +21,14 @@ const mcpServerName = "softpractice"
 func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.Writer) error {
 	usageText := func() error {
 		return usage(ctx,
-			"использование: softpractice mcp setup <codex-desktop|claude-desktop> [--project DIR] [--print]",
-			"usage: softpractice mcp setup <codex-desktop|claude-desktop> [--project DIR] [--print]")
+			"использование: softpractice mcp setup <codex-desktop|claude-desktop> [--print]",
+			"usage: softpractice mcp setup <codex-desktop|claude-desktop> [--print]")
 	}
 	if len(args) == 0 || (args[0] != "claude-desktop" && args[0] != "codex-desktop") {
 		return usageText()
 	}
 	flags := flag.NewFlagSet("mcp setup "+args[0], flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
-	project := flags.String("project", "", "optional lesson project folder for direct stdio mode")
 	printOnly := flags.Bool("print", false, "print the configuration entry instead of writing it")
 	if err := parseFlags(flags, args[1:]); err != nil {
 		return err
@@ -39,25 +36,17 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 	if flags.NArg() != 0 {
 		return usageText()
 	}
-	root := ""
-	if strings.TrimSpace(*project) != "" {
-		var err error
-		root, err = mcpProjectRoot(ctx, strings.TrimSpace(*project))
-		if err != nil {
-			return err
-		}
-	}
 	executable, err := mcpSetupExecutable(ctx)
 	if err != nil {
 		return err
 	}
 	if args[0] == "codex-desktop" {
-		return setupCodexDesktop(ctx, executable, root, *printOnly, output)
+		return setupCodexDesktop(ctx, executable, *printOnly, output)
 	}
 	entry, err := json.Marshal(struct {
 		Command string   `json:"command"`
 		Args    []string `json:"args"`
-	}{executable, mcpSetupArgs(root)})
+	}{executable, []string{"mcp", "connect"}})
 	if err != nil {
 		return err
 	}
@@ -82,7 +71,7 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 	} else {
 		fmt.Fprintf(output, text(ctx, "Claude Desktop уже настроен: %s\n", "Claude Desktop is already configured: %s\n"), path)
 	}
-	printMCPSetupTarget(ctx, executable, root, output)
+	printMCPSetupTarget(ctx, executable, output)
 	if backup != "" {
 		fmt.Fprintf(output, text(ctx, "Прежний файл сохранён: %s\n", "The previous file is saved as %s\n"), backup)
 	}
@@ -91,28 +80,8 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 			"\nПолностью закрой Claude Desktop (не только окно) и запусти снова: инструменты softpractice появятся в меню инструментов чата.",
 			"\nQuit Claude Desktop completely, not just its window, and start it again: the softpractice tools appear in the chat's tools menu."))
 	}
-	printMCPSetupNextStep(ctx, root, output)
+	printMCPSetupNextStep(ctx, output)
 	return nil
-}
-
-func mcpProjectRoot(ctx context.Context, directory string) (string, error) {
-	if directory != "" {
-		absolute, err := filepath.Abs(directory)
-		if err != nil {
-			return "", err
-		}
-		directory = absolute
-	}
-	repository, err := inspectGitRepository(ctx, directory, false)
-	if err == nil {
-		_, err = learnercli.LoadProjectLink(repository.Root)
-	}
-	if err != nil {
-		return "", fmt.Errorf(text(ctx,
-			"запусти сервер в папке проекта урока или укажи --project: %w",
-			"start the server in the lesson project folder or pass --project: %w"), err)
-	}
-	return repository.Root, nil
 }
 
 // mcpSetupExecutable is the native program, not the npm wrapper that started
@@ -316,4 +285,14 @@ func encodeJSONObject(members []jsonMember) ([]byte, error) {
 func mustEncodeJSONObject(members []jsonMember) json.RawMessage {
 	data, _ := encodeJSONObject(members)
 	return data
+}
+
+func printMCPSetupTarget(ctx context.Context, executable string, output io.Writer) {
+	fmt.Fprintf(output, text(ctx, "  Программа: %s\n", "  Program: %s\n"), executable)
+}
+
+func printMCPSetupNextStep(ctx context.Context, output io.Writer) {
+	fmt.Fprintln(output, text(ctx,
+		"Запусти softpractice mcp в папке урока или softpractice mcp --project DIR и оставь терминал открытым. При смене проекта останови сервер, запусти его в новой папке и переподключи MCP-клиент. Повторять setup не нужно.",
+		"Run softpractice mcp in the lesson folder or softpractice mcp --project DIR and keep the terminal open. To switch projects, stop the server, start it in the new folder, and reconnect the MCP client. Setup does not need to be repeated."))
 }
