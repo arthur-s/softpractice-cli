@@ -317,6 +317,6 @@ func printMCPSetupTarget(ctx context.Context, executable string, output io.Write
 
 func printMCPSetupNextStep(ctx context.Context, output io.Writer) {
 	fmt.Fprintln(output, text(ctx,
-		"Запусти softpractice mcp в папке урока или softpractice mcp --project DIR и оставь терминал открытым. При смене проекта останови сервер, запусти его в новой папке и переподключи MCP-клиент. Повторять setup не нужно.",
-		"Run softpractice mcp in the lesson folder or softpractice mcp --project DIR and keep the terminal open. To switch projects, stop the server, start it in the new folder, and reconnect the MCP client. Setup does not need to be repeated."))
+		"Запусти softpractice mcp в папке урока или softpractice mcp --project DIR и оставь терминал открытым. При смене проекта останови сервер и запусти его в новой папке, затем повтори запрос. Перезапускать MCP-клиент или повторять setup не нужно.",
+		"Run softpractice mcp in the lesson folder or softpractice mcp --project DIR and keep the terminal open. To switch projects, stop the server and start it in the new folder, then repeat the request. Restarting the MCP client or repeating setup is unnecessary."))
 }
