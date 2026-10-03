@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,14 +67,14 @@ func serveLocalMCP(ctx context.Context, server *mcp.Server, project string, outp
 	fmt.Fprintf(output, text(ctx,
 		"SoftPractice MCP-сервер запущен.\nПроект: %s\nПодключение: %s (только этот компьютер).\nНастрой клиент из любой папки: softpractice mcp setup claude-desktop или softpractice mcp setup codex-desktop.\nОставь терминал открытым. Остановить: Ctrl+C.\n",
 		"SoftPractice MCP server is running.\nProject: %s\nConnection: %s (this computer only).\nConfigure the client from any folder: softpractice mcp setup claude-desktop or softpractice mcp setup codex-desktop.\nKeep this terminal open. Stop: Ctrl+C.\n"), project, localMCPAddress)
-	err = acceptLocalMCP(ctx, listener, server, token)
+	err = acceptLocalMCP(ctx, listener, server, token, localMCPStatus{Kind: "softpractice.mcp.status", State: "running", Project: project, PID: os.Getpid(), Address: localMCPAddress, Version: cliVersion})
 	if ctx.Err() != nil {
 		return nil
 	}
 	return err
 }
 
-func acceptLocalMCP(ctx context.Context, listener net.Listener, server *mcp.Server, token string) error {
+func acceptLocalMCP(ctx context.Context, listener net.Listener, server *mcp.Server, token string, status localMCPStatus) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
@@ -95,9 +96,18 @@ func acceptLocalMCP(ctx context.Context, listener net.Listener, server *mcp.Serv
 			_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 			reader := bufio.NewReaderSize(connection, 4096)
 			line, err := reader.ReadSlice('\n')
-			if err != nil || !hmac.Equal(line, []byte(token+"\n")) {
+
+			if err != nil {
 				return
 			}
+			if hmac.Equal(line, []byte(token+" status\n")) {
+				_ = json.NewEncoder(connection).Encode(status)
+				return
+			}
+			if !hmac.Equal(line, []byte(token+"\n")) {
+				return
+			}
+
 			if _, err := io.WriteString(connection, "OK\n"); err != nil {
 				return
 			}
@@ -113,28 +123,13 @@ func connectLocalMCP(ctx context.Context, input io.Reader, output io.Writer) err
 			"MCP-сервер недоступен: %w. Запусти `softpractice mcp` в папке урока или `softpractice mcp --project DIR`, затем переподключи MCP-клиент",
 			"MCP server is unavailable: %w. Run `softpractice mcp` in the lesson folder or `softpractice mcp --project DIR`, then reconnect the MCP client"), err)
 	}
-	path, err := localMCPTokenPath()
-	if err != nil {
-		return unavailable(err)
-	}
-	token, err := os.ReadFile(path)
-	if err != nil {
-		return unavailable(err)
-	}
-	if len(token) != 64 {
-		return unavailable(errors.New("invalid local MCP token"))
-	}
-	connection, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp4", localMCPAddress)
+	connection, err := dialLocalMCP(ctx, "")
 	if err != nil {
 		return unavailable(err)
 	}
 	defer connection.Close()
 	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stop()
-	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := fmt.Fprintf(connection, "%s\n", token); err != nil {
-		return unavailable(err)
-	}
 	reader := bufio.NewReader(connection)
 	if ack, err := reader.ReadString('\n'); err != nil || ack != "OK\n" {
 		if err == nil {
@@ -161,4 +156,32 @@ func connectLocalMCP(ctx context.Context, input io.Reader, output io.Writer) err
 	default:
 		return unavailable(errors.Join(err, io.EOF))
 	}
+}
+
+// The suffix selects an internal management request after authentication.
+// It is never forwarded to the MCP client or exposed as a learner tool.
+func dialLocalMCP(ctx context.Context, suffix string) (net.Conn, error) {
+	path, err := localMCPTokenPath()
+	if err != nil {
+		return nil, err
+	}
+	token, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(token) != 64 {
+		return nil, errors.New("invalid local MCP token")
+	}
+	connection, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp4", localMCPAddress)
+	if err != nil {
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
+	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := fmt.Fprintf(connection, "%s%s\n", token, suffix); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	return connection, nil
 }

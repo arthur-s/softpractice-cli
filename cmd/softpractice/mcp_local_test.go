@@ -68,6 +68,17 @@ func TestLocalMCPBridgeAndProjectSwitch(t *testing.T) {
 			cancel()
 			t.Fatalf("project missing: %s", banner.String())
 		}
+		var statusOutput bytes.Buffer
+		if err := mcpStatusCommand(ctx, []string{"--json"}, &statusOutput, io.Discard); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		var status localMCPStatus
+		if err := json.Unmarshal(statusOutput.Bytes(), &status); err != nil || status.State != "running" || status.Project != resolved || status.PID != os.Getpid() || status.Version != cliVersion {
+			cancel()
+			t.Fatalf("running status: %+v, %v", status, err)
+		}
+
 		// Starting another project cannot replace the active server's secret.
 		if err := mcpCommand(ctx, nil, []string{"--project", createLinkedGitRepository(t, uuid.NewString())}, strings.NewReader(""), io.Discard, io.Discard); err == nil {
 			cancel()
@@ -85,7 +96,7 @@ func TestLocalMCPBridgeAndProjectSwitch(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = connection.SetDeadline(time.Now().Add(time.Second))
-		_, _ = io.WriteString(connection, "wrong-secret\n")
+		_, _ = io.WriteString(connection, "wrong-secret status\n")
 		response, _ := io.ReadAll(connection)
 		_ = connection.Close()
 		if len(response) != 0 {
@@ -146,6 +157,20 @@ func TestLocalMCPBridgeAndProjectSwitch(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("token was not removed: %v", err)
 		}
+		stopped, err := readLocalMCPStatus(context.Background())
+		if err != nil || stopped.State != "not_running" {
+			t.Fatalf("stopped status: %+v, %v", stopped, err)
+		}
+		// A key left by an abnormal exit does not imply a running server.
+		if err := os.WriteFile(path, token, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stopped, err = readLocalMCPStatus(context.Background())
+		if err != nil || stopped.State != "not_running" {
+			t.Fatalf("stale status: %+v, %v", stopped, err)
+		}
+		_ = os.Remove(path)
+
 	}
 }
 

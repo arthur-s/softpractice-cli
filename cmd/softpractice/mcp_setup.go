@@ -58,7 +58,7 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 		_, err = output.Write(document)
 		return err
 	}
-	path, err := claudeDesktopConfigPath(ctx)
+	path, err := claudeDesktopConfigPath(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -105,7 +105,7 @@ func mcpSetupExecutable(ctx context.Context) (string, error) {
 // claudeDesktopConfigPath is the file Claude Desktop reads. Its Microsoft
 // Store (MSIX) build reads a virtualized copy of %APPDATA% once it has
 // written one, while its Edit Config button still opens the real file.
-func claudeDesktopConfigPath(ctx context.Context) (string, error) {
+func claudeDesktopConfigPath(ctx context.Context, requireApp bool) (string, error) {
 	const name = "claude_desktop_config.json"
 	if runtime.GOOS == "windows" {
 		if local := os.Getenv("LOCALAPPDATA"); local != "" {
@@ -122,7 +122,7 @@ func claudeDesktopConfigPath(ctx context.Context) (string, error) {
 		return "", err
 	}
 	directory := filepath.Join(base, "Claude")
-	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+	if info, err := os.Stat(directory); requireApp && (err != nil || !info.IsDir()) {
 		return "", fmt.Errorf(text(ctx,
 			"Claude Desktop не найден (нет папки %s); установи и запусти его один раз или получи запись для ручной настройки: softpractice mcp setup claude-desktop --print",
 			"Claude Desktop is not found (no folder %s); install and start it once, or get the entry for manual setup: softpractice mcp setup claude-desktop --print"), directory)
@@ -133,13 +133,21 @@ func claudeDesktopConfigPath(ctx context.Context) (string, error) {
 // addMCPServerToConfig sets mcpServers.softpractice and keeps every other
 // member as it was, in its order: the file also holds the app's preferences.
 // A file that is not a JSON object is left untouched.
-func addMCPServerToConfig(ctx context.Context, path string, entry json.RawMessage) (backup string, changed bool, err error) {
+func addMCPServerToConfig(ctx context.Context, path string, entry json.RawMessage) (string, bool, error) {
+	return updateMCPServerConfig(ctx, path, entry)
+}
+
+// A nil entry removes only SoftPractice. Missing files and entries are a no-op.
+func updateMCPServerConfig(ctx context.Context, path string, entry json.RawMessage) (backup string, changed bool, err error) {
 	mode := fs.FileMode(0o644)
 	original, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", false, err
 	}
 	exists := err == nil
+	if !exists && entry == nil {
+		return "", false, nil
+	}
 	if exists {
 		if info, err := os.Stat(path); err == nil {
 			mode = info.Mode().Perm()
@@ -165,7 +173,23 @@ func addMCPServerToConfig(ctx context.Context, path string, entry json.RawMessag
 			}
 		}
 	}
-	servers = setJSONMember(servers, mcpServerName, entry)
+	if entry == nil {
+		kept := servers[:0]
+		found := false
+		for _, member := range servers {
+			if member.Key == mcpServerName {
+				found = true
+			} else {
+				kept = append(kept, member)
+			}
+		}
+		if !found {
+			return "", false, nil
+		}
+		servers = kept
+	} else {
+		servers = setJSONMember(servers, mcpServerName, entry)
+	}
 	encodedServers, err := encodeJSONObject(servers)
 	if err != nil {
 		return "", false, err

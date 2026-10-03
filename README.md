@@ -91,6 +91,8 @@ softpractice update
 | `softpractice open` | Open the task, material, or latest result in the browser |
 | `softpractice mcp` | Run the MCP server for Claude Code, Codex, Claude Desktop, and other agents |
 | `softpractice mcp setup codex-desktop` | Configure MCP for Codex Desktop without installing Codex CLI |
+| `softpractice mcp status` | Check the running server and its project |
+| `softpractice mcp remove codex-desktop` | Remove the connection from Codex settings |
 | `softpractice project restore` | Restore a project from the latest usable revision |
 
 Run `softpractice help <command>` for detailed help.
@@ -225,6 +227,44 @@ and [Codex MCP documentation](https://developers.openai.com/codex/mcp).
 `softpractice mcp` always starts the local server, including with redirected
 stdin or in the background. Only server startup selects the project. Setup
 connects the client to the single running server and does not accept `--project`.
+
+### Checking the server
+
+From any folder, check which server is running:
+
+```bash
+softpractice mcp status
+softpractice mcp status --json
+```
+
+The command checks a live connection and shows the lesson folder, PID,
+local address, and CLI version. A stopped server returns `not_running`;
+a key file left after a crash is not treated as proof of a running server.
+No lesson project or sign-in is needed. This reports the local process;
+lesson information remains available through `softpractice status` and the
+MCP `status` tool.
+
+### Stopping the server and removing the connection
+
+Press Ctrl+C in the server's terminal to stop the lesson server. The client
+configuration remains available for the next startup.
+
+To remove the client connection, run from any folder:
+
+```bash
+softpractice mcp remove claude-desktop
+# or
+softpractice mcp remove codex-desktop
+```
+
+This removes only the SoftPractice entry, preserves other settings, and saves
+the previous file as `.bak`. Repeating the command is safe: missing entries
+or files are left untouched. Restart the client to apply the change. Codex
+shares these settings between Desktop, CLI, and the IDE extension; project
+settings may override them.
+
+Removing the connection does not stop the lesson server. To reconnect,
+run the corresponding `softpractice mcp setup` command again.
 
 ### Using the server
 

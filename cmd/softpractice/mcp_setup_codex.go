@@ -114,7 +114,7 @@ func replaceCodexServerTables(original, entry []byte) ([]byte, error) {
 	if bytes.Contains(original, []byte("\r\n")) {
 		newline = []byte("\r\n")
 	}
-	if updated.Len() > 0 {
+	if len(entry) > 0 && updated.Len() > 0 {
 		if !bytes.HasSuffix(updated.Bytes(), []byte("\n")) {
 			updated.Write(newline)
 		}
@@ -141,11 +141,19 @@ func tableStart(document []byte, header int) int {
 }
 
 func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[string]any) (string, bool, error) {
+	return updateCodexMCPServerConfig(ctx, path, entry)
+}
+
+// A nil entry removes only SoftPractice, including its nested tables.
+func updateCodexMCPServerConfig(ctx context.Context, path string, entry map[string]any) (string, bool, error) {
 	original, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", false, err
 	}
 	exists := err == nil
+	if !exists && entry == nil {
+		return "", false, nil
+	}
 	mode := fs.FileMode(0o600)
 	if exists {
 		info, err := os.Stat(path)
@@ -155,6 +163,9 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 		mode = info.Mode().Perm()
 	}
 	unchanged := func(err error) (string, bool, error) {
+		if entry == nil {
+			return "", false, fmt.Errorf(text(ctx, "Не удалось удалить подключение из %s, файл не изменён: %w", "Could not remove the connection from %s; the file is unchanged: %w"), path, err)
+		}
 		return "", false, fmt.Errorf(text(ctx,
 			"Не удалось обновить %s, файл не изменён; используй softpractice mcp setup codex-desktop --print для ручной настройки: %w",
 			"Could not update %s; the file is unchanged. Use softpractice mcp setup codex-desktop --print for manual setup: %w"), path, err)
@@ -168,6 +179,9 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 		if _, exists := config["mcp_servers"]; exists {
 			return unchanged(errors.New("mcp_servers is not a TOML table"))
 		}
+		if entry == nil {
+			return "", false, nil
+		}
 		servers = map[string]any{}
 		config["mcp_servers"] = servers
 	}
@@ -178,6 +192,9 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 		if !ok {
 			return unchanged(errors.New("mcp_servers.softpractice is not a TOML table"))
 		}
+	}
+	if entry == nil && servers[mcpServerName] == nil {
+		return "", false, nil
 	}
 	previous, _ := toml.Marshal(server)
 	// A stdio entry must not retain a previous HTTP transport.
@@ -191,30 +208,42 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 	if err != nil {
 		return unchanged(err)
 	}
-	if exists && bytes.Equal(previous, current) {
+	if entry != nil && exists && bytes.Equal(previous, current) {
 		return "", false, nil
 	}
-	servers[mcpServerName] = server
-	document, err := toml.Marshal(map[string]any{"mcp_servers": map[string]any{mcpServerName: server}})
-	if err != nil {
-		return unchanged(err)
+
+	var document []byte
+	if entry == nil {
+		delete(servers, mcpServerName)
+	} else {
+		servers[mcpServerName] = server
+		document, err = toml.Marshal(map[string]any{"mcp_servers": map[string]any{mcpServerName: server}})
+		if err != nil {
+			return unchanged(err)
+		}
 	}
 	updated, err := replaceCodexServerTables(original, document)
 	if err != nil {
 		return unchanged(err)
 	}
-	var verified map[string]any
+	verified := map[string]any{}
 	if err := toml.Unmarshal(updated, &verified); err != nil {
 		return unchanged(err)
 	}
 	// Inline or dotted server definitions cannot be safely replaced as sections.
-	var expected map[string]any
+	expected := map[string]any{}
 	canonical, err := toml.Marshal(config)
 	if err != nil {
 		return unchanged(err)
 	}
 	if err := toml.Unmarshal(canonical, &expected); err != nil {
 		return unchanged(err)
+	}
+	if entry == nil && len(servers) == 0 {
+		delete(expected, "mcp_servers")
+		if remaining, ok := verified["mcp_servers"].(map[string]any); ok && len(remaining) == 0 {
+			delete(verified, "mcp_servers")
+		}
 	}
 	if !reflect.DeepEqual(verified, expected) {
 		return unchanged(errors.New("unsupported TOML server layout"))

@@ -209,6 +209,22 @@ func TestCodexDesktopSetupCommandPrintAndWrite(t *testing.T) {
 		t.Fatalf("Claude global config: %s, %v", saved, err)
 	}
 
+	// Both removal commands use the same isolated desktop settings and need
+	// no lesson project or running server.
+	for _, client := range []string{"claude-desktop", "codex-desktop"} {
+		command := exec.Command(executable, "mcp", "remove", client)
+		command.Dir = outside
+		if removed, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("%s remove: %s, %v", client, removed, err)
+		}
+		// Repeat without replacing the saved backup or failing.
+		command = exec.Command(executable, "mcp", "remove", client)
+		command.Dir = outside
+		if removed, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("%s repeated remove: %s, %v", client, removed, err)
+		}
+	}
+
 }
 
 // Comments directly above a table belong to it: replacing the server table
