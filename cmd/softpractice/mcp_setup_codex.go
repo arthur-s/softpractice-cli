@@ -31,7 +31,7 @@ func codexConfigPath() (string, error) {
 func codexServerEntry(executable, root string) map[string]any {
 	return map[string]any{
 		"command":          executable,
-		"args":             []string{"mcp", "--project", root},
+		"args":             mcpSetupArgs(root),
 		"tool_timeout_sec": int64(180),
 		"enabled":          true,
 	}
@@ -60,7 +60,7 @@ func setupCodexDesktop(ctx context.Context, executable, root string, printOnly b
 	} else {
 		fmt.Fprintf(output, text(ctx, "Codex Desktop уже настроен: %s\n", "Codex Desktop is already configured: %s\n"), path)
 	}
-	fmt.Fprintf(output, text(ctx, "  Программа: %s\n  Проект:    %s\n", "  Program: %s\n  Project: %s\n"), executable, root)
+	printMCPSetupTarget(ctx, executable, root, output)
 	if backup != "" {
 		fmt.Fprintf(output, text(ctx, "Прежний файл сохранён: %s\n", "The previous file is saved as %s\n"), backup)
 	}
@@ -69,9 +69,7 @@ func setupCodexDesktop(ctx context.Context, executable, root string, printOnly b
 			"\nПерезапусти Codex Desktop и открой папку проекта урока. Проверь сервер softpractice в настройках MCP и попроси агента показать статус урока и задание.",
 			"\nRestart Codex Desktop and open the lesson project folder. Check the softpractice server in the MCP settings and ask the agent to show the lesson status and task."))
 	}
-	fmt.Fprintln(output, text(ctx,
-		"Настройки общие с Codex CLI и расширением IDE. Для другого проекта урока повтори команду в его папке.",
-		"Settings are shared with Codex CLI and the IDE extension. For another lesson project, run the command again in its folder."))
+	printMCPSetupNextStep(ctx, root, output)
 	return nil
 }
 

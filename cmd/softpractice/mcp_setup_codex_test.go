@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,7 +45,7 @@ func TestCodexSetupPreservesSettingsAndSwitchesProject(t *testing.T) {
 	}
 	server := config["mcp_servers"].(map[string]any)[mcpServerName].(map[string]any)
 	if server["command"] != entry["command"] || server["enabled"] != true || server["tool_timeout_sec"] != int64(180) ||
-		!reflect.DeepEqual(server["args"], []any{"mcp", "--project", `/work/lesson "one"`}) ||
+		!reflect.DeepEqual(server["args"], []any{"mcp", "--stdio", "--project", `/work/lesson "one"`}) ||
 		server["url"] != nil || server["env"].(map[string]any)["SOFTPRACTICE_LANGUAGE"] != "en" ||
 		!reflect.DeepEqual(server["disabled_tools"], []any{"submit"}) {
 		t.Fatalf("server = %#v", server)
@@ -66,7 +67,7 @@ func TestCodexSetupPreservesSettingsAndSwitchesProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	server = config["mcp_servers"].(map[string]any)[mcpServerName].(map[string]any)
-	if !reflect.DeepEqual(server["args"], []any{"mcp", "--project", "/work/second"}) {
+	if !reflect.DeepEqual(server["args"], []any{"mcp", "--stdio", "--project", "/work/second"}) {
 		t.Fatalf("switched args = %#v", server["args"])
 	}
 	info, err := os.Stat(path)
@@ -140,7 +141,7 @@ func TestCodexDesktopSetupCommandPrintAndWrite(t *testing.T) {
 		t.Fatal("printed an unnecessary parent table")
 	}
 	server := config["mcp_servers"].(map[string]any)[mcpServerName].(map[string]any)
-	if !filepath.IsAbs(server["command"].(string)) || !reflect.DeepEqual(server["args"], []any{"mcp", "--project", root}) {
+	if !filepath.IsAbs(server["command"].(string)) || !reflect.DeepEqual(server["args"], []any{"mcp", "--stdio", "--project", root}) {
 		t.Fatalf("entry = %#v", server)
 	}
 	path, err := codexConfigPath()
@@ -157,6 +158,63 @@ func TestCodexDesktopSetupCommandPrintAndWrite(t *testing.T) {
 	if _, err := os.Stat(path); err != nil || !strings.Contains(string(output), "Codex Desktop") {
 		t.Fatalf("setup: %s, %v", output, err)
 	}
+
+	// Setup and --print work before a lesson project exists.
+	outside := t.TempDir()
+	for _, client := range []string{"claude-desktop", "codex-desktop"} {
+		command := exec.Command(executable, "mcp", "setup", client, "--print")
+		command.Dir = outside
+		printed, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s outside project: %s, %v", client, printed, err)
+		}
+		if client == "claude-desktop" {
+			var config struct {
+				Servers map[string]struct{ Args []string } `json:"mcpServers"`
+			}
+			if err := json.Unmarshal(printed, &config); err != nil || !reflect.DeepEqual(config.Servers[mcpServerName].Args, []string{"mcp", "connect"}) {
+				t.Fatalf("Claude entry: %s, %v", printed, err)
+			}
+		} else {
+			var config map[string]any
+			if err := toml.Unmarshal(printed, &config); err != nil {
+				t.Fatal(err)
+			}
+			if args := config["mcp_servers"].(map[string]any)[mcpServerName].(map[string]any)["args"]; !reflect.DeepEqual(args, []any{"mcp", "connect"}) {
+				t.Fatalf("Codex args: %v", args)
+			}
+		}
+	}
+	command := exec.Command(executable, "mcp", "setup", "codex-desktop")
+	command.Dir = outside
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "softpractice mcp --project DIR") {
+		t.Fatalf("global setup: %s, %v", output, err)
+	}
+
+	// Isolate all platform-specific Claude configuration paths from the user's
+	// real desktop settings when exercising the writer outside a project.
+	configBase := t.TempDir()
+	t.Setenv("HOME", configBase)
+	t.Setenv("XDG_CONFIG_HOME", configBase)
+	t.Setenv("APPDATA", configBase)
+	t.Setenv("LOCALAPPDATA", configBase)
+	if runtime.GOOS == "darwin" {
+		configBase = filepath.Join(configBase, "Library", "Application Support")
+	}
+	claudeDirectory := filepath.Join(configBase, "Claude")
+	if err := os.MkdirAll(claudeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command(executable, "mcp", "setup", "claude-desktop")
+	command.Dir = outside
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "softpractice mcp --project DIR") {
+		t.Fatalf("Claude global setup: %s, %v", output, err)
+	}
+	saved, err := os.ReadFile(filepath.Join(claudeDirectory, "claude_desktop_config.json"))
+	if err != nil || !bytes.Contains(saved, []byte(`"connect"`)) {
+		t.Fatalf("Claude global config: %s, %v", saved, err)
+	}
+
 }
 
 // Comments directly above a table belong to it: replacing the server table

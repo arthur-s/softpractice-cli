@@ -31,7 +31,7 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 	}
 	flags := flag.NewFlagSet("mcp setup "+args[0], flag.ContinueOnError)
 	flags.SetOutput(errorOutput)
-	project := flags.String("project", "", "lesson project folder; defaults to the current directory")
+	project := flags.String("project", "", "optional lesson project folder for direct stdio mode")
 	printOnly := flags.Bool("print", false, "print the configuration entry instead of writing it")
 	if err := parseFlags(flags, args[1:]); err != nil {
 		return err
@@ -39,9 +39,13 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 	if flags.NArg() != 0 {
 		return usageText()
 	}
-	root, err := mcpSetupProjectRoot(ctx, strings.TrimSpace(*project))
-	if err != nil {
-		return err
+	root := ""
+	if strings.TrimSpace(*project) != "" {
+		var err error
+		root, err = mcpProjectRoot(ctx, strings.TrimSpace(*project))
+		if err != nil {
+			return err
+		}
 	}
 	executable, err := mcpSetupExecutable(ctx)
 	if err != nil {
@@ -53,7 +57,7 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 	entry, err := json.Marshal(struct {
 		Command string   `json:"command"`
 		Args    []string `json:"args"`
-	}{executable, []string{"mcp", "--project", root}})
+	}{executable, mcpSetupArgs(root)})
 	if err != nil {
 		return err
 	}
@@ -78,7 +82,7 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 	} else {
 		fmt.Fprintf(output, text(ctx, "Claude Desktop уже настроен: %s\n", "Claude Desktop is already configured: %s\n"), path)
 	}
-	fmt.Fprintf(output, text(ctx, "  Программа: %s\n  Проект:    %s\n", "  Program: %s\n  Project: %s\n"), executable, root)
+	printMCPSetupTarget(ctx, executable, root, output)
 	if backup != "" {
 		fmt.Fprintf(output, text(ctx, "Прежний файл сохранён: %s\n", "The previous file is saved as %s\n"), backup)
 	}
@@ -87,13 +91,11 @@ func mcpSetupCommand(ctx context.Context, args []string, output, errorOutput io.
 			"\nПолностью закрой Claude Desktop (не только окно) и запусти снова: инструменты softpractice появятся в меню инструментов чата.",
 			"\nQuit Claude Desktop completely, not just its window, and start it again: the softpractice tools appear in the chat's tools menu."))
 	}
-	fmt.Fprintln(output, text(ctx,
-		"Для другого проекта урока повтори команду в его папке: Claude Desktop работает с одним проектом.",
-		"For another lesson project, run the command again in its folder: Claude Desktop works with one project."))
+	printMCPSetupNextStep(ctx, root, output)
 	return nil
 }
 
-func mcpSetupProjectRoot(ctx context.Context, directory string) (string, error) {
+func mcpProjectRoot(ctx context.Context, directory string) (string, error) {
 	if directory != "" {
 		absolute, err := filepath.Abs(directory)
 		if err != nil {
@@ -107,8 +109,8 @@ func mcpSetupProjectRoot(ctx context.Context, directory string) (string, error) 
 	}
 	if err != nil {
 		return "", fmt.Errorf(text(ctx,
-			"запусти команду в папке проекта урока или укажи --project: %w",
-			"run the command in the lesson project folder or pass --project: %w"), err)
+			"запусти сервер в папке проекта урока или укажи --project: %w",
+			"start the server in the lesson project folder or pass --project: %w"), err)
 	}
 	return repository.Root, nil
 }
