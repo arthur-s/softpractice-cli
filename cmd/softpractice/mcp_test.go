@@ -79,6 +79,9 @@ func newMCPLessonAPI(t *testing.T) *mcpLessonAPI {
 	api := &mcpLessonAPI{workspaceID: uuid.NewString()}
 	api.server = lessonBumpServer(t, api.workspaceID, func(writer http.ResponseWriter, request *http.Request) {
 		switch {
+		case request.URL.Path == "/v1/assignments/pa-foundation-01" && request.URL.Query().Get("version") == "2":
+			writeTestJSON(writer, assignmentDetail{ID: "pa-foundation-01", Version: 2, Title: "Pricing", Kind: "foundation", ProjectSetup: "download", ExerciseID: "pa-foundation-01", EstimatedMinutes: 45, InstructionsMarkdown: "Extract the price rule.", ContentSHA256: strings.Repeat("c", 64)})
+
 		case request.Method == http.MethodPost &&
 			request.URL.Path == "/v1/workspaces/"+api.workspaceID+"/assignments/pa-foundation-01/submissions":
 			_, _ = io.Copy(io.Discard, request.Body)

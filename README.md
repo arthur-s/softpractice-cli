@@ -197,18 +197,29 @@ Keep this terminal open. The server validates the Git repository and
 SoftPractice project link before accepting connections. It uses the CLI's
 saved sign-in; it never opens a sign-in flow itself.
 
-Start the server before restarting the desktop client. The client's stdio
-bridge, `softpractice mcp connect`, forwards MCP messages to the running
-server on `127.0.0.1:39473`. Connections require a random per-run key saved in
-the CLI's user configuration folder. Both processes must run on the same
-computer under the same user and use the same `SOFTPRACTICE_CONFIG_DIR` if
-that environment variable is set. This address is not an HTTP URL.
+On macOS, the client automatically starts `softpractice mcp connect`. This
+process stays connected even when no lesson server is running. You can open
+Claude Desktop or Codex Desktop before starting the lesson: tools remain
+listed, and a lesson request explains how to start the server. Start, stop,
+or restart the lesson server without restarting Desktop, then repeat the
+request. Pending confirmations become invalid if the lesson server restarts.
+No system service is installed; the client owns the connection process.
+
+On Linux and Windows, `mcp connect` still forwards MCP messages to the running
+lesson server. Start the lesson server before starting the client. If the
+server is offline, the bridge prints the startup command to stderr and exits;
+start the server and reconnect the client.
+
+The lesson server listens on `127.0.0.1:39473`. Connections require a random
+per-run key saved in the CLI's user configuration folder. Both processes
+must run on the same computer under the same user and use the same
+`SOFTPRACTICE_CONFIG_DIR` if that environment variable is set. This address
+is not an HTTP URL.
 
 Only one lesson server can run on this computer at a time. To switch projects,
-stop it with Ctrl+C, start it in the other lesson folder, and reconnect the
-client's MCP connection (or restart the client). Setup does not need to be
-repeated. If the server is offline, the bridge prints the startup command to
-stderr and exits; start the server and reconnect.
+stop it with Ctrl+C and start it in the other lesson folder. On macOS, the next
+request uses the new project; on other platforms, reconnect the client's MCP
+connection. Setup does not need to be repeated.
 
 ### Claude Code and Codex CLI
 
@@ -240,7 +251,7 @@ softpractice mcp status --json
 The command checks a live connection and shows the lesson folder, PID,
 local address, and CLI version. A stopped server returns `not_running`;
 a key file left after a crash is not treated as proof of a running server.
-No lesson project or sign-in is needed. This reports the local process;
+No lesson project or sign-in is needed. This reports the lesson server, not the client connection process;
 lesson information remains available through `softpractice status` and the
 MCP `status` tool.
 

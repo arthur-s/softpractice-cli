@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,9 @@ func mcpCommand(
 	if len(args) > 0 && args[0] == "connect" {
 		if len(args) != 1 {
 			return usage(ctx, "использование: softpractice mcp connect", "usage: softpractice mcp connect")
+		}
+		if runtime.GOOS == "darwin" {
+			return runMCPGateway(ctx, client, input, output, errorOutput)
 		}
 		return connectLocalMCP(ctx, input, output)
 	}
@@ -250,6 +254,15 @@ func (s *mcpServer) register(server *mcp.Server) {
 	}, s.materialResource)
 }
 
+// Gateway requests capture their selected project in context. Ordinary local
+// server requests continue to use the server's fixed project.
+func (s *mcpServer) operations(ctx context.Context) learnerUseCases {
+	if operations, ok := ctx.Value(mcpGatewayOperationsKey{}).(learnerUseCases); ok {
+		return operations
+	}
+	return s.useCases
+}
+
 // context gives a handler the CLI settings: language and web URL.
 func (s *mcpServer) context(ctx context.Context) context.Context {
 	return withSettings(ctx, s.settings)
@@ -259,7 +272,7 @@ type mcpNoInput struct{}
 
 func (s *mcpServer) status(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, machineStatus, error) {
 	ctx = s.context(ctx)
-	snapshot, err := s.useCases.Status(ctx)
+	snapshot, err := s.operations(ctx).Status(ctx)
 	if err != nil {
 		return nil, machineStatus{}, mcpToolFailure(ctx, err)
 	}
@@ -293,7 +306,7 @@ func mcpNextActions(actions []nextAction) []nextAction {
 
 func (s *mcpServer) task(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, machineTask, error) {
 	ctx = s.context(ctx)
-	lesson, assignment, err := s.useCases.Task(ctx)
+	lesson, assignment, err := s.operations(ctx).Task(ctx)
 	if err != nil {
 		return nil, machineTask{}, mcpToolFailure(ctx, err)
 	}
@@ -322,7 +335,7 @@ type mcpMaterialInput struct {
 
 func (s *mcpServer) material(ctx context.Context, _ *mcp.CallToolRequest, input mcpMaterialInput) (*mcp.CallToolResult, machineMaterial, error) {
 	ctx = s.context(ctx)
-	snapshot, err := s.useCases.Material(ctx, strings.TrimSpace(input.LessonID))
+	snapshot, err := s.operations(ctx).Material(ctx, strings.TrimSpace(input.LessonID))
 	if err != nil {
 		return nil, machineMaterial{}, mcpToolFailure(ctx, err)
 	}
@@ -334,7 +347,7 @@ func (s *mcpServer) material(ctx context.Context, _ *mcp.CallToolRequest, input 
 
 func (s *mcpServer) hints(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, machineHints, error) {
 	ctx = s.context(ctx)
-	snapshot, err := s.useCases.Hints(ctx)
+	snapshot, err := s.operations(ctx).Hints(ctx)
 	if err != nil {
 		return nil, machineHints{}, mcpToolFailure(ctx, err)
 	}
@@ -358,7 +371,7 @@ type mcpCheckOutput struct {
 func (s *mcpServer) check(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, mcpCheckOutput, error) {
 	ctx = s.context(ctx)
 	var combined lockedBuffer
-	err := s.useCases.CheckPublished(ctx, &combined, &combined)
+	err := s.operations(ctx).CheckPublished(ctx, &combined, &combined)
 	payload := mcpCheckOutput{Kind: "softpractice.check", Passed: err == nil}
 	var failed checkFailedError
 	if err != nil {
@@ -467,13 +480,13 @@ func (s *mcpServer) result(ctx context.Context, request *mcp.CallToolRequest, in
 			usage(ctx, "ID отправки должен быть каноническим UUID", "submission ID must be a canonical UUID"))
 	}
 	if submissionID == "" {
-		latest, err := s.useCases.LatestSubmission(ctx)
+		latest, err := s.operations(ctx).LatestSubmission(ctx)
 		if err != nil {
 			return nil, mcpEvaluation{}, mcpToolFailure(ctx, err)
 		}
 		submissionID, previousLesson = latest.SubmissionID, latest.PredecessorAssignmentID
 	}
-	evaluation, err := s.useCases.Evaluation(ctx, submissionID, wait, mcpReviewFeedback)
+	evaluation, err := s.operations(ctx).Evaluation(ctx, submissionID, wait, mcpReviewFeedback)
 	if err != nil {
 		return nil, mcpEvaluation{}, mcpToolFailure(ctx, err)
 	}
@@ -485,7 +498,7 @@ func (s *mcpServer) result(ctx context.Context, request *mcp.CallToolRequest, in
 
 func (s *mcpServer) submissions(ctx context.Context, _ *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, machineSubmissions, error) {
 	ctx = s.context(ctx)
-	snapshot, err := s.useCases.Submissions(ctx)
+	snapshot, err := s.operations(ctx).Submissions(ctx)
 	if err != nil {
 		return nil, machineSubmissions{}, mcpToolFailure(ctx, err)
 	}
@@ -512,7 +525,7 @@ func (s *mcpServer) submit(ctx context.Context, request *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, mcpSubmission{}, mcpToolFailure(ctx, err)
 	}
-	prepared, err := s.useCases.PrepareSubmission(ctx)
+	prepared, err := s.operations(ctx).PrepareSubmission(ctx)
 	if err != nil {
 		return nil, mcpSubmission{}, mcpToolFailure(ctx, err)
 	}
@@ -535,7 +548,7 @@ func (s *mcpServer) submit(ctx context.Context, request *mcp.CallToolRequest, in
 	if err != nil || confirmation != nil {
 		return confirmation, mcpSubmission{}, err
 	}
-	receipt, err := s.useCases.SendSubmission(ctx, prepared)
+	receipt, err := s.operations(ctx).SendSubmission(ctx, prepared)
 	if err != nil {
 		return nil, mcpSubmission{}, mcpToolFailure(ctx, err)
 	}
@@ -549,7 +562,7 @@ func (s *mcpServer) submit(ctx context.Context, request *mcp.CallToolRequest, in
 		LocalChecks: "not_run",
 	}
 	if wait.Wait {
-		evaluation, err := s.useCases.Evaluation(ctx, receipt.SubmissionID, wait, mcpReviewFeedback)
+		evaluation, err := s.operations(ctx).Evaluation(ctx, receipt.SubmissionID, wait, mcpReviewFeedback)
 		if err != nil {
 			// The submission was sent: report it, and let result fetch the
 			// evaluation later.
@@ -576,7 +589,7 @@ type mcpUpdate struct {
 
 func (s *mcpServer) update(ctx context.Context, request *mcp.CallToolRequest, _ mcpNoInput) (*mcp.CallToolResult, mcpUpdate, error) {
 	ctx = s.context(ctx)
-	plan, err := s.useCases.PrepareUpdate(ctx)
+	plan, err := s.operations(ctx).PrepareUpdate(ctx)
 	if err != nil {
 		return nil, mcpUpdate{}, mcpToolFailure(ctx, err)
 	}
@@ -612,7 +625,7 @@ func (s *mcpServer) update(ctx context.Context, request *mcp.CallToolRequest, _ 
 		return confirmation, mcpUpdate{}, err
 	}
 	var report bytes.Buffer
-	if err := s.useCases.ApplyUpdate(ctx, plan, &report); err != nil {
+	if err := s.operations(ctx).ApplyUpdate(ctx, plan, &report); err != nil {
 		return nil, mcpUpdate{}, mcpToolFailure(ctx, err)
 	}
 	return nil, mcpUpdate{
@@ -656,6 +669,15 @@ func (s *mcpServer) confirm(
 	request *mcp.CallToolRequest,
 	tool, fingerprint, message string,
 ) (*mcp.CallToolResult, error) {
+	if identity, ok := ctx.Value(mcpGatewayIdentityKey{}).(string); ok {
+		current, err := readLocalMCPStatus(ctx)
+		if err != nil || current.State != "running" || mcpGatewayIdentity(current) != identity {
+			return nil, mcpFailure("changed_since_confirmation", text(ctx,
+				"Сервер урока остановлен, перезапущен или выбран другой проект. Ничего не сделано; прочитай status и повтори запрос.",
+				"The lesson server stopped, restarted, or changed project. Nothing was done; read status and repeat the request."))
+		}
+		fingerprint = identity + "\n" + fingerprint
+	}
 	answer, answered := request.Params.InputResponses[mcpConfirmationID]
 	if !answered {
 		if capabilities := request.ClientCapabilities(); capabilities == nil || capabilities.Elicitation == nil ||
@@ -778,7 +800,7 @@ func mcpToolFailure(ctx context.Context, err error) error {
 
 func (s *mcpServer) taskResource(ctx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	ctx = s.context(ctx)
-	_, assignment, err := s.useCases.Task(ctx)
+	_, assignment, err := s.operations(ctx).Task(ctx)
 	if err != nil {
 		return nil, mcpToolFailure(ctx, err)
 	}
@@ -790,7 +812,7 @@ func (s *mcpServer) taskResource(ctx context.Context, request *mcp.ReadResourceR
 
 func (s *mcpServer) materialResource(ctx context.Context, request *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	ctx = s.context(ctx)
-	snapshot, err := s.useCases.Material(ctx, "")
+	snapshot, err := s.operations(ctx).Material(ctx, "")
 	if err != nil {
 		return nil, mcpToolFailure(ctx, err)
 	}
