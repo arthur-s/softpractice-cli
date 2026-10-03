@@ -14,12 +14,13 @@ import (
 )
 
 type localMCPStatus struct {
-	Kind    string `json:"kind"`
-	State   string `json:"state"`
-	Project string `json:"project,omitempty"`
-	PID     int    `json:"pid,omitempty"`
-	Address string `json:"address"`
-	Version string `json:"version,omitempty"`
+	InstanceID string `json:"instance_id,omitempty"`
+	Kind       string `json:"kind"`
+	State      string `json:"state"`
+	Project    string `json:"project,omitempty"`
+	PID        int    `json:"pid,omitempty"`
+	Address    string `json:"address"`
+	Version    string `json:"version,omitempty"`
 }
 
 func readLocalMCPStatus(ctx context.Context) (localMCPStatus, error) {

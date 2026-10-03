@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -67,7 +68,8 @@ func serveLocalMCP(ctx context.Context, server *mcp.Server, project string, outp
 	fmt.Fprintf(output, text(ctx,
 		"SoftPractice MCP-сервер запущен.\nПроект: %s\nПодключение: %s (только этот компьютер).\nНастрой клиент из любой папки: softpractice mcp setup claude-desktop или softpractice mcp setup codex-desktop.\nОставь терминал открытым. Остановить: Ctrl+C.\n",
 		"SoftPractice MCP server is running.\nProject: %s\nConnection: %s (this computer only).\nConfigure the client from any folder: softpractice mcp setup claude-desktop or softpractice mcp setup codex-desktop.\nKeep this terminal open. Stop: Ctrl+C.\n"), project, localMCPAddress)
-	err = acceptLocalMCP(ctx, listener, server, token, localMCPStatus{Kind: "softpractice.mcp.status", State: "running", Project: project, PID: os.Getpid(), Address: localMCPAddress, Version: cliVersion})
+	instance := sha256.Sum256([]byte(token))
+	err = acceptLocalMCP(ctx, listener, server, token, localMCPStatus{InstanceID: hex.EncodeToString(instance[:]), Kind: "softpractice.mcp.status", State: "running", Project: project, PID: os.Getpid(), Address: localMCPAddress, Version: cliVersion})
 	if ctx.Err() != nil {
 		return nil
 	}

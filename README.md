@@ -156,6 +156,7 @@ reading the evaluation.
 ### Configure once, from any folder
 
 Install the CLI (see [Install](#install)), then configure your desktop client.
+For Claude Desktop, install and open the app once before setup.
 You do not need a lesson project yet:
 
 ```bash
@@ -164,10 +165,14 @@ softpractice mcp setup claude-desktop
 softpractice mcp setup codex-desktop
 ```
 
+After setup, quit the desktop client completely and start it again to load
+the connection settings.
+
 Setup registers the CLI's absolute executable path and `mcp connect` as the
-launch arguments. It preserves other settings and saves the previous file as
-`.bak`. Claude Desktop uses `claude_desktop_config.json`; on Windows, setup
-also finds the configuration used by the Microsoft Store version. Codex uses
+launch arguments. It only updates the configuration; it does not start a
+server or install a service that runs when the computer starts. It preserves
+other settings and saves the previous file as `.bak`. Claude Desktop uses
+`claude_desktop_config.json`; on Windows, setup also finds the configuration used by the Microsoft Store version. Codex uses
 `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and a tool timeout of
 180 seconds. Codex Desktop, CLI, and the IDE extension share these settings.
 No separate Codex CLI installation is needed for desktop setup.
@@ -197,18 +202,25 @@ Keep this terminal open. The server validates the Git repository and
 SoftPractice project link before accepting connections. It uses the CLI's
 saved sign-in; it never opens a sign-in flow itself.
 
-Start the server before restarting the desktop client. The client's stdio
-bridge, `softpractice mcp connect`, forwards MCP messages to the running
-server on `127.0.0.1:39473`. Connections require a random per-run key saved in
-the CLI's user configuration folder. Both processes must run on the same
-computer under the same user and use the same `SOFTPRACTICE_CONFIG_DIR` if
-that environment variable is set. This address is not an HTTP URL.
+On macOS, Linux, and Windows, the client automatically starts
+`softpractice mcp connect` and communicates with it over stdio. This connection
+process is separate from the lesson server started in your terminal. It stays
+connected even when no lesson server is running. You can open
+Claude Desktop or Codex Desktop before starting the lesson: tools remain
+listed, and a lesson request explains how to start the server. Start, stop,
+or restart the lesson server without restarting Desktop, then repeat the
+request. Pending confirmations become invalid if the lesson server restarts.
+No system service is installed; the client owns the connection process.
+
+The lesson server listens on `127.0.0.1:39473`. Connections require a random
+per-run key saved in the CLI's user configuration folder. Both processes
+must run on the same computer under the same user and use the same
+`SOFTPRACTICE_CONFIG_DIR` if that environment variable is set. This address
+is not an HTTP URL.
 
 Only one lesson server can run on this computer at a time. To switch projects,
-stop it with Ctrl+C, start it in the other lesson folder, and reconnect the
-client's MCP connection (or restart the client). Setup does not need to be
-repeated. If the server is offline, the bridge prints the startup command to
-stderr and exits; start the server and reconnect.
+stop it with Ctrl+C and start it in the other lesson folder. The next request
+uses the new project. Setup does not need to be repeated.
 
 ### Claude Code and Codex CLI
 
@@ -226,7 +238,8 @@ and [Codex MCP documentation](https://developers.openai.com/codex/mcp).
 
 `softpractice mcp` always starts the local server, including with redirected
 stdin or in the background. Only server startup selects the project. Setup
-connects the client to the single running server and does not accept `--project`.
+registers the connection command and does not accept `--project`.
+The lesson server must be running for tools to work with the lesson.
 
 ### Checking the server
 
@@ -240,14 +253,17 @@ softpractice mcp status --json
 The command checks a live connection and shows the lesson folder, PID,
 local address, and CLI version. A stopped server returns `not_running`;
 a key file left after a crash is not treated as proof of a running server.
-No lesson project or sign-in is needed. This reports the local process;
-lesson information remains available through `softpractice status` and the
-MCP `status` tool.
+No lesson project or sign-in is needed. This reports the lesson server,
+not the client connection process. Lesson information is available through
+`softpractice status` and, while the lesson server is running, the MCP
+`status` tool.
 
 ### Stopping the server and removing the connection
 
-Press Ctrl+C in the server's terminal to stop the lesson server. The client
-configuration remains available for the next startup.
+Press Ctrl+C in the server's terminal to stop the lesson server. The MCP
+connection remains active, but lesson requests ask you to start the lesson
+server. Start it again and repeat the request; no client restart is
+needed.
 
 To remove the client connection, run from any folder:
 
