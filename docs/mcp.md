@@ -6,6 +6,13 @@ Connect the server using the [README instructions](../README.md#mcp-server).
 It works with one linked lesson Git project, selected by its startup directory
 or `--project`. Tool calls cannot switch the project folder.
 
+Setup (`softpractice mcp setup ...`) works from any folder. Then run
+`softpractice mcp` in the lesson folder or pass `--project DIR`, and keep the
+terminal open. The client connects through `softpractice mcp connect`. To
+switch projects, stop the server, start it in the other folder, and reconnect
+the client; setup does not need to be repeated. Only one lesson server can
+run at a time. Server startup always uses local TCP, regardless of stdin.
+
 ## What to ask the agent
 
 Write your request in the chat with Codex, Claude, or another MCP client. The
@@ -107,6 +114,7 @@ separate shell tools.
 
 | Symptom or code | What to do |
 | --- | --- |
+| Bridge reports that the server is unavailable | Start `softpractice mcp` in the lesson folder or pass `--project DIR`, then reconnect the MCP client. |
 | Server does not start | Check that the client can find the installed CLI; use its executable's full path if needed. Check `--project` points to an existing folder. |
 | `not_git_repository` or `project_not_linked` | Select the lesson Git project, not the parent directory. Download or restore the project with the CLI if needed. |
 | `login_required` | Run `softpractice login` in a terminal on the same computer and retry the tool. |

@@ -28,17 +28,17 @@ func codexConfigPath() (string, error) {
 	return filepath.Abs(filepath.Join(directory, "config.toml"))
 }
 
-func codexServerEntry(executable, root string) map[string]any {
+func codexServerEntry(executable string) map[string]any {
 	return map[string]any{
 		"command":          executable,
-		"args":             []string{"mcp", "--project", root},
+		"args":             []string{"mcp", "connect"},
 		"tool_timeout_sec": int64(180),
 		"enabled":          true,
 	}
 }
 
-func setupCodexDesktop(ctx context.Context, executable, root string, printOnly bool, output io.Writer) error {
-	entry := codexServerEntry(executable, root)
+func setupCodexDesktop(ctx context.Context, executable string, printOnly bool, output io.Writer) error {
+	entry := codexServerEntry(executable)
 	if printOnly {
 		document, err := toml.Marshal(map[string]any{"mcp_servers": map[string]any{mcpServerName: entry}})
 		if err != nil {
@@ -60,7 +60,7 @@ func setupCodexDesktop(ctx context.Context, executable, root string, printOnly b
 	} else {
 		fmt.Fprintf(output, text(ctx, "Codex Desktop уже настроен: %s\n", "Codex Desktop is already configured: %s\n"), path)
 	}
-	fmt.Fprintf(output, text(ctx, "  Программа: %s\n  Проект:    %s\n", "  Program: %s\n  Project: %s\n"), executable, root)
+	printMCPSetupTarget(ctx, executable, output)
 	if backup != "" {
 		fmt.Fprintf(output, text(ctx, "Прежний файл сохранён: %s\n", "The previous file is saved as %s\n"), backup)
 	}
@@ -69,9 +69,7 @@ func setupCodexDesktop(ctx context.Context, executable, root string, printOnly b
 			"\nПерезапусти Codex Desktop и открой папку проекта урока. Проверь сервер softpractice в настройках MCP и попроси агента показать статус урока и задание.",
 			"\nRestart Codex Desktop and open the lesson project folder. Check the softpractice server in the MCP settings and ask the agent to show the lesson status and task."))
 	}
-	fmt.Fprintln(output, text(ctx,
-		"Настройки общие с Codex CLI и расширением IDE. Для другого проекта урока повтори команду в его папке.",
-		"Settings are shared with Codex CLI and the IDE extension. For another lesson project, run the command again in its folder."))
+	printMCPSetupNextStep(ctx, output)
 	return nil
 }
 
@@ -116,7 +114,7 @@ func replaceCodexServerTables(original, entry []byte) ([]byte, error) {
 	if bytes.Contains(original, []byte("\r\n")) {
 		newline = []byte("\r\n")
 	}
-	if updated.Len() > 0 {
+	if len(entry) > 0 && updated.Len() > 0 {
 		if !bytes.HasSuffix(updated.Bytes(), []byte("\n")) {
 			updated.Write(newline)
 		}
@@ -143,11 +141,19 @@ func tableStart(document []byte, header int) int {
 }
 
 func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[string]any) (string, bool, error) {
+	return updateCodexMCPServerConfig(ctx, path, entry)
+}
+
+// A nil entry removes only SoftPractice, including its nested tables.
+func updateCodexMCPServerConfig(ctx context.Context, path string, entry map[string]any) (string, bool, error) {
 	original, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", false, err
 	}
 	exists := err == nil
+	if !exists && entry == nil {
+		return "", false, nil
+	}
 	mode := fs.FileMode(0o600)
 	if exists {
 		info, err := os.Stat(path)
@@ -157,6 +163,9 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 		mode = info.Mode().Perm()
 	}
 	unchanged := func(err error) (string, bool, error) {
+		if entry == nil {
+			return "", false, fmt.Errorf(text(ctx, "Не удалось удалить подключение из %s, файл не изменён: %w", "Could not remove the connection from %s; the file is unchanged: %w"), path, err)
+		}
 		return "", false, fmt.Errorf(text(ctx,
 			"Не удалось обновить %s, файл не изменён; используй softpractice mcp setup codex-desktop --print для ручной настройки: %w",
 			"Could not update %s; the file is unchanged. Use softpractice mcp setup codex-desktop --print for manual setup: %w"), path, err)
@@ -170,6 +179,9 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 		if _, exists := config["mcp_servers"]; exists {
 			return unchanged(errors.New("mcp_servers is not a TOML table"))
 		}
+		if entry == nil {
+			return "", false, nil
+		}
 		servers = map[string]any{}
 		config["mcp_servers"] = servers
 	}
@@ -180,6 +192,9 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 		if !ok {
 			return unchanged(errors.New("mcp_servers.softpractice is not a TOML table"))
 		}
+	}
+	if entry == nil && servers[mcpServerName] == nil {
+		return "", false, nil
 	}
 	previous, _ := toml.Marshal(server)
 	// A stdio entry must not retain a previous HTTP transport.
@@ -193,30 +208,42 @@ func addCodexMCPServerToConfig(ctx context.Context, path string, entry map[strin
 	if err != nil {
 		return unchanged(err)
 	}
-	if exists && bytes.Equal(previous, current) {
+	if entry != nil && exists && bytes.Equal(previous, current) {
 		return "", false, nil
 	}
-	servers[mcpServerName] = server
-	document, err := toml.Marshal(map[string]any{"mcp_servers": map[string]any{mcpServerName: server}})
-	if err != nil {
-		return unchanged(err)
+
+	var document []byte
+	if entry == nil {
+		delete(servers, mcpServerName)
+	} else {
+		servers[mcpServerName] = server
+		document, err = toml.Marshal(map[string]any{"mcp_servers": map[string]any{mcpServerName: server}})
+		if err != nil {
+			return unchanged(err)
+		}
 	}
 	updated, err := replaceCodexServerTables(original, document)
 	if err != nil {
 		return unchanged(err)
 	}
-	var verified map[string]any
+	verified := map[string]any{}
 	if err := toml.Unmarshal(updated, &verified); err != nil {
 		return unchanged(err)
 	}
 	// Inline or dotted server definitions cannot be safely replaced as sections.
-	var expected map[string]any
+	expected := map[string]any{}
 	canonical, err := toml.Marshal(config)
 	if err != nil {
 		return unchanged(err)
 	}
 	if err := toml.Unmarshal(canonical, &expected); err != nil {
 		return unchanged(err)
+	}
+	if entry == nil && len(servers) == 0 {
+		delete(expected, "mcp_servers")
+		if remaining, ok := verified["mcp_servers"].(map[string]any); ok && len(remaining) == 0 {
+			delete(verified, "mcp_servers")
+		}
 	}
 	if !reflect.DeepEqual(verified, expected) {
 		return unchanged(errors.New("unsupported TOML server layout"))

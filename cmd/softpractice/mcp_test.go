@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -361,73 +359,16 @@ func TestMCPNextActionsNameTools(t *testing.T) {
 	}
 }
 
-// `softpractice mcp` speaks JSON-RPC on standard output and writes nothing
-// else there.
-func TestMCPCommandWritesOnlyJSONRPCToStdout(t *testing.T) {
-	directory := t.TempDir()
-	t.Setenv(configDirectoryEnv, directory)
-	t.Setenv("SOFTPRACTICE_CREDENTIALS_DIR", directory)
+// Even piped protocol input cannot bypass project validation or select another
+// transport: mcp always starts the local lesson server.
+func TestMCPCommandRejectsUnlinkedProjectBeforeProtocol(t *testing.T) {
+	t.Setenv(configDirectoryEnv, t.TempDir())
+	t.Setenv("SOFTPRACTICE_CREDENTIALS_DIR", t.TempDir())
 	t.Setenv("SOFTPRACTICE_API_URL", "http://127.0.0.1:9")
-	t.Setenv("SOFTPRACTICE_LANGUAGE", "")
-	t.Setenv("LC_ALL", "")
-	t.Setenv("LC_MESSAGES", "")
-	t.Setenv("LANG", "")
-
-	inputReader, inputWriter := io.Pipe()
-	outputReader, outputWriter := io.Pipe()
-	var errorOutput lockedBuffer
-	done := make(chan error, 1)
-	go func() {
-		done <- run(context.Background(), []string{"mcp", "--project", t.TempDir()}, inputReader, outputWriter, &errorOutput)
-		_ = outputWriter.Close()
-	}()
-	lines := bufio.NewScanner(outputReader)
-	lines.Buffer(make([]byte, 1<<20), 1<<20)
-	send := func(message string) {
-		if _, err := io.WriteString(inputWriter, message+"\n"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	receive := func() map[string]any {
-		if !lines.Scan() {
-			t.Fatalf("no response: %v; stderr: %s", lines.Err(), errorOutput.String())
-		}
-		var message map[string]any
-		if err := json.Unmarshal(lines.Bytes(), &message); err != nil || message["jsonrpc"] != "2.0" {
-			t.Fatalf("stdout line is not JSON-RPC: %q", lines.Text())
-		}
-		return message
-	}
-	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`)
-	receive()
-	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
-	send(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	if tools := receive()["result"].(map[string]any)["tools"].([]any); len(tools) != 9 {
-		t.Fatalf("tools/list returned %d tools", len(tools))
-	}
-	// Outside a Git repository the error is a tool result, in Russian by
-	// default when no language is configured anywhere. The system locale
-	// still counts: Windows reports its display language.
-	wantAction := "Запустите"
-	if languageFromLocale(systemLocaleName()) == languageEnglish {
-		wantAction = "Start the MCP server"
-	}
-	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"task","arguments":{}}}`)
-	response := receive()["result"].(map[string]any)
-	text := response["content"].([]any)[0].(map[string]any)["text"].(string)
-	if response["isError"] != true || !strings.Contains(text, "not_git_repository") || !strings.Contains(text, wantAction) {
-		t.Fatalf("task outside a project = %v", response)
-	}
-	_ = inputWriter.Close()
-	select {
-	case err := <-done:
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, mcp.ErrConnectionClosed) {
-			t.Fatalf("mcp command: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the MCP server did not stop when standard input closed")
-	}
-	for lines.Scan() {
-		t.Fatalf("unexpected stdout after shutdown: %q", lines.Text())
+	var output, errorOutput lockedBuffer
+	input := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)
+	err := run(context.Background(), []string{"mcp", "--project", t.TempDir()}, input, &output, &errorOutput)
+	if err == nil || !strings.Contains(err.Error(), "--project") || output.String() != "" {
+		t.Fatalf("unlinked project: %v, stdout=%s", err, output.String())
 	}
 }

@@ -8,7 +8,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.48.0
-	golang.org/x/term v0.46.0
 )
 
 require (

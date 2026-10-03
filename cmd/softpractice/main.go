@@ -243,6 +243,12 @@ func run(
 	case "open":
 		return openCurrent(ctx, client, "", remaining[1:], output, errorOutput)
 	case "mcp":
+		if len(remaining) > 1 && remaining[1] == "status" {
+			return mcpStatusCommand(ctx, remaining[2:], output, errorOutput)
+		}
+		if len(remaining) > 1 && remaining[1] == "remove" {
+			return mcpRemoveCommand(ctx, remaining[2:], output)
+		}
 		if len(remaining) > 1 && remaining[1] == "setup" {
 			return mcpSetupCommand(ctx, remaining[2:], output, errorOutput)
 		}
