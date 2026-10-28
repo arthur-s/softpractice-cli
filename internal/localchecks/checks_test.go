@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,5 +97,36 @@ func TestLoadFailsClosed(t *testing.T) {
 	}
 	if _, err := Load(root); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unknown version error = %v", err)
+	}
+}
+
+func TestPriorRevisionsRequireSupportedSchemaAndPreparedInputs(t *testing.T) {
+	body := []byte(`{"schema_version":2,"prior_revisions":["lesson-06"],"checks":[{"name":"test","executable":"git","args":["--version"],"timeout_seconds":1}]}`)
+	config, err := Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), t.TempDir(), config, io.Discard, io.Discard); err == nil {
+		t.Fatal("missing inputs accepted")
+	}
+	for _, body := range []string{
+		`{"schema_version":1,"prior_revisions":["lesson-06"],"checks":[]}`,
+		`{"schema_version":3,"checks":[]}`,
+		`{"schema_version":2,"prior_revisions":["../escape"],"checks":[]}`,
+	} {
+		if _, err := Parse([]byte(body)); err == nil {
+			t.Fatal("invalid schema accepted")
+		}
+	}
+}
+
+func TestSchemaOneClearsInheritedHistoryEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	t.Setenv("SOFTPRACTICE_CHECK_INPUTS_ROOT", "/untrusted")
+	config := Config{SchemaVersion: 1, Checks: []Check{{Name: "no inherited inputs", Executable: "sh", Args: []string{"-c", `test -z "${SOFTPRACTICE_CHECK_INPUTS_ROOT+x}"`}, TimeoutSeconds: 2}}}
+	if err := Run(context.Background(), t.TempDir(), config, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
 	}
 }

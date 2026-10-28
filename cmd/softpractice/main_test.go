@@ -1416,7 +1416,7 @@ func TestUpdateInvalidChecksLeavesProjectUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":2,"checks":[]}`),
+	err = downloadAndApplyCourseUpdate(context.Background(), client, root, link, update, []byte(`{"schema_version":3,"checks":[]}`),
 		"/v1/workspaces/"+link.WorkspaceID+"/current-assignment/course-update/archive?format=tar.gz", strings.TrimSpace(string(head)))
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("expected unsupported schema: %v", err)

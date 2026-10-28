@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -18,9 +19,12 @@ import (
 
 const RelativePath = ".softpractice/checks.json"
 
+var priorAssignmentPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
 type Config struct {
-	SchemaVersion int     `json:"schema_version"`
-	Checks        []Check `json:"checks"`
+	SchemaVersion  int      `json:"schema_version"`
+	Checks         []Check  `json:"checks"`
+	PriorRevisions []string `json:"prior_revisions,omitempty"`
 }
 
 type Check struct {
@@ -75,8 +79,21 @@ func Marshal(config Config) ([]byte, error) {
 }
 
 func validate(config Config) (Config, error) {
-	if config.SchemaVersion != 1 {
+	if config.SchemaVersion != 1 && config.SchemaVersion != 2 {
 		return Config{}, fmt.Errorf("unsupported local checks schema_version %d; update softpractice CLI", config.SchemaVersion)
+	}
+	if config.SchemaVersion == 1 && len(config.PriorRevisions) != 0 {
+		return Config{}, errors.New("prior revisions require schema 2")
+	}
+	if len(config.PriorRevisions) > 8 {
+		return Config{}, errors.New("too many prior revisions")
+	}
+	seen := make(map[string]bool)
+	for _, id := range config.PriorRevisions {
+		if len(id) > 80 || !priorAssignmentPattern.MatchString(id) || seen[id] {
+			return Config{}, errors.New("invalid or duplicate prior revision")
+		}
+		seen[id] = true
 	}
 	if len(config.Checks) == 0 || len(config.Checks) > 20 {
 		return Config{}, errors.New("local checks configuration must contain 1 to 20 checks")
@@ -96,11 +113,31 @@ func validate(config Config) (Config, error) {
 }
 
 func Run(ctx context.Context, root string, config Config, output, errorOutput io.Writer) error {
+	return RunWithInputs(ctx, root, config, "", output, errorOutput)
+}
+
+// RunWithInputs sets the input directory only for child checks. An inherited
+// value is never trusted, including when the current config needs no inputs.
+func RunWithInputs(ctx context.Context, root string, config Config, inputs string, output, errorOutput io.Writer) error {
+	if len(config.PriorRevisions) != 0 && inputs == "" {
+		return errors.New("public checks require prepared prior revisions; run softpractice check")
+	}
+	env := make([]string, 0)
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "SOFTPRACTICE_CHECK_INPUTS_ROOT=") {
+			env = append(env, value)
+		}
+	}
+	if inputs != "" {
+		env = append(env, "SOFTPRACTICE_CHECK_INPUTS_ROOT="+inputs)
+	}
+
 	for index, check := range config.Checks {
 		fmt.Fprintf(output, "[%d/%d] %s: %s %s\n", index+1, len(config.Checks), check.Name, check.Executable, strings.Join(check.Args, " "))
 		checkContext, cancel := context.WithTimeout(ctx, time.Duration(check.TimeoutSeconds)*time.Second)
 		command := exec.CommandContext(checkContext, check.Executable, check.Args...)
 		command.Dir = root
+		command.Env = env
 		fmt.Fprintf(output, "Executable: %s\n", command.Path)
 		configureProcess(command)
 		// Only waitProcess owns cancellation, so the parent is not killed before

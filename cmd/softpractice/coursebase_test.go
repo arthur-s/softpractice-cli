@@ -351,3 +351,17 @@ func TestVersionWarnsThatASourceBuildCannotSubmit(t *testing.T) {
 		t.Fatalf("placeholder version does not explain itself: %q", output.String())
 	}
 }
+
+func TestCheckWithHistoricalInputsRequiresUsableAPI(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-02", 1)
+	writeChecksAndCommit(t, root, `{"schema_version":2,"prior_revisions":["pa-foundation-01"],"checks":[{"name":"git version","executable":"git","args":["--version"],"timeout_seconds":30}]}`)
+	t.Chdir(root)
+	var output, errorOutput bytes.Buffer
+	err := run(context.Background(), []string{"--api", "://invalid", "check"}, nil, &output, &errorOutput)
+	if err == nil || !strings.Contains(err.Error(), "historical inputs") {
+		t.Fatalf("check = %v; output=%s", err, &output)
+	}
+	if strings.Contains(output.String(), "All local public checks passed.") {
+		t.Fatalf("checks ran without historical inputs: %q", output.String())
+	}
+}
