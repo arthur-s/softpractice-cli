@@ -22,7 +22,8 @@ import (
 // All CLI/MCP check entry points use the same input preparation. History is
 // never copied into the checked project or its immutable submission archive.
 func runChecksWithInputs(ctx context.Context, client *learnercli.Client, projectRoot, checkRoot string, config localchecks.Config, output, errorOutput io.Writer) (result error) {
-	if config.SchemaVersion == 1 && len(config.PriorRevisions) == 0 {
+	// Without declared history the checks need no network, whatever the schema.
+	if len(config.PriorRevisions) == 0 {
 		return localchecks.Run(ctx, checkRoot, config, output, errorOutput)
 	}
 	if client == nil {
@@ -38,9 +39,6 @@ func runChecksWithInputs(ctx context.Context, client *learnercli.Client, project
 	}
 	if pendingTransition(link, workspace) || pendingLessonVersion(link, workspace) || !reflect.DeepEqual(config.PriorRevisions, published.PriorRevisions) || config.SchemaVersion != published.SchemaVersion {
 		return errors.New(text(ctx, "конфигурация проверок отличается от опубликованной для урока; выполните softpractice update", "local check inputs differ from the published lesson; apply softpractice update"))
-	}
-	if len(config.PriorRevisions) == 0 {
-		return localchecks.Run(ctx, checkRoot, config, output, errorOutput)
 	}
 	if workspace.Workspace.BaseRevisionID == nil {
 		return errors.New(text(ctx, "проверкам нужна принятая базовая сдача предыдущего урока", "public checks require an accepted base revision"))
@@ -191,14 +189,21 @@ func inputDigests(root string) (map[string][32]byte, error) {
 	return result, err
 }
 
-// Windows also needs writable files for deletion. This applies only to the
-// private directory created for this run, never to any project directory.
+// Windows also needs writable files for deletion, and a check may leave a
+// read-only subdirectory whose entries cannot be unlinked. This applies only to
+// the private directory created for this run, never to any project directory.
 func removeCheckInputs(root string) error {
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err == nil && entry.Type().IsRegular() {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0700)
+		}
+		if entry.Type().IsRegular() {
 			return os.Chmod(path, 0600)
 		}
-		return err
+		return nil
 	})
 	return os.RemoveAll(root)
 }

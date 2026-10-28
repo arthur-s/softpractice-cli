@@ -87,7 +87,7 @@ func historicalZIP(t *testing.T) ([]byte, string) {
 }
 
 func TestHistoricalInputsHTTPAndSnapshot(t *testing.T) {
-	for _, mode := range []string{"working", "snapshot", "mutate", "stale", "bad-hash", "wrong-base", "truncated", "tamper", "cancel"} {
+	for _, mode := range []string{"working", "published", "snapshot", "mutate", "stale", "bad-hash", "wrong-base", "truncated", "tamper", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			workspaceID, base, revision := uuid.NewString(), uuid.NewString(), uuid.NewString()
 			root := createPinnedLinkedGitRepository(t, workspaceID, "lesson-08", 1)
@@ -170,6 +170,14 @@ func TestHistoricalInputsHTTPAndSnapshot(t *testing.T) {
 				if err != nil {
 					t.Fatalf("snapshot checks: %v\n%s", err, output.String())
 				}
+			} else if mode == "published" {
+				// The MCP check tool reaches history through the same materializer.
+				if err := newLearnerUseCases(client, root).CheckPublished(context.Background(), &output, &output); err != nil {
+					t.Fatalf("published checks: %v\n%s", err, output.String())
+				}
+				if !strings.Contains(output.String(), "INPUT_ROOT=") {
+					t.Fatalf("published checks did not run the history check: %s", output.String())
+				}
 			} else {
 				if mode == "cancel" {
 					recorder := &cancelInputWriter{buffer: &output, cancel: cancel}
@@ -212,4 +220,53 @@ func (w *cancelInputWriter) Write(data []byte) (int, error) {
 		w.cancel()
 	}
 	return n, err
+}
+
+func TestHistoricalDataPathProjectsOnlyDeclaredSQLData(t *testing.T) {
+	for path, want := range map[string]bool{
+		"loading.json":           true,
+		"sql/ingest.sql":         true,
+		"sql/migrations/001.sql": true,
+		"sql/queries/top.sql":    true,
+		"sql/queries/a/b.sql":    false,
+		"sql/migrations/a/b.sql": false,
+		"sql/queries/notes.md":   false,
+		"sql/migrations/001.py":  false,
+		"sql/other/x.sql":        false,
+		"nested/loading.json":    false,
+		"tools/__init__.py":      false,
+		"sql/queries/":           false,
+		"sql/ingest.sql.bak":     false,
+		"AGENTS.md":              false,
+	} {
+		if got := historicalDataPath(path); got != want {
+			t.Errorf("historicalDataPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestRemoveCheckInputsClearsReadOnlyDirectories(t *testing.T) {
+	root, err := os.MkdirTemp(t.TempDir(), "inputs-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(root, "lesson-06", "sql")
+	if err := os.MkdirAll(locked, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "ingest.sql"), []byte("SELECT 6"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	// A check may tighten permissions on the projected tree it was given.
+	for _, dir := range []string{locked, filepath.Dir(locked)} {
+		if err := os.Chmod(dir, 0500); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeCheckInputs(root); err != nil {
+		t.Fatalf("remove inputs: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("input directory remains: %v", err)
+	}
 }

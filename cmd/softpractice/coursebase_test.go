@@ -365,3 +365,16 @@ func TestCheckWithHistoricalInputsRequiresUsableAPI(t *testing.T) {
 		t.Fatalf("checks ran without historical inputs: %q", output.String())
 	}
 }
+
+func TestCheckSchemaTwoWithoutHistoryRunsOffline(t *testing.T) {
+	root := createPinnedLinkedGitRepository(t, uuid.NewString(), "pa-foundation-02", 1)
+	writeChecksAndCommit(t, root, `{"schema_version":2,"checks":[{"name":"git version","executable":"git","args":["--version"],"timeout_seconds":30}]}`)
+	t.Chdir(root)
+	var output, errorOutput bytes.Buffer
+	if err := run(context.Background(), []string{"--api", "://invalid", "check"}, nil, &output, &errorOutput); err != nil {
+		t.Fatalf("check = %v; output=%s errors=%s", err, &output, &errorOutput)
+	}
+	if !strings.Contains(output.String(), "All local public checks passed.") {
+		t.Fatalf("check output = %q", output.String())
+	}
+}
