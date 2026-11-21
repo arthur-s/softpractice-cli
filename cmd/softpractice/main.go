@@ -194,7 +194,13 @@ func run(
 		return err
 	}
 	if remaining[0] == "check" {
-		return checkProject(ctx, "", remaining[1:], output, errorOutput)
+		// Lessons without historical inputs check offline: an unusable API
+		// configuration matters only when the lesson declares prior revisions.
+		var client *learnercli.Client
+		if store, err := learnercli.DefaultCredentialStore(); err == nil {
+			client, _ = learnercli.NewClient(settings.APIURL, store)
+		}
+		return checkProject(withSettings(ctx, settings), client, "", remaining[1:], output, errorOutput)
 	}
 	if _, err := learnercli.NewClient(settings.APIURL, learnercli.CredentialStore{}); err != nil {
 		return err
@@ -1502,7 +1508,7 @@ func submit(
 		}
 	}
 	if enabled {
-		if err := runSubmissionChecks(ctx, repository, human, errorOutput); err != nil {
+		if err := runSubmissionChecks(ctx, client, repository, human, errorOutput); err != nil {
 			return err
 		}
 	} else {

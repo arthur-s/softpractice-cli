@@ -481,7 +481,8 @@ type CourseUpdateArchive struct {
 // RevisionArchive describes a ZIP containing one learner-owned immutable
 // submission revision.
 type RevisionArchive struct {
-	Size int64
+	Headers http.Header
+	Size    int64
 }
 
 // DownloadStarter streams an authenticated starter bundle to destination and
@@ -639,7 +640,7 @@ func (c *Client) downloadRevisionArchiveOnce(ctx context.Context, token, path st
 	if err != nil || written != size {
 		return RevisionArchive{}, errors.New("revision download was incomplete")
 	}
-	return RevisionArchive{Size: size}, nil
+	return RevisionArchive{Size: size, Headers: response.Header.Clone()}, nil
 }
 
 func (e *HTTPError) Error() string {

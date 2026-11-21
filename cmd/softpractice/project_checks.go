@@ -46,7 +46,7 @@ func setProjectAutoChecks(ctx context.Context, value string, output io.Writer) e
 	return nil
 }
 
-func checkProject(ctx context.Context, startDirectory string, args []string, output, errorOutput io.Writer) error {
+func checkProject(ctx context.Context, client *learnercli.Client, startDirectory string, args []string, output, errorOutput io.Writer) error {
 	if len(args) != 0 {
 		return usage(ctx, "использование: softpractice check", "usage: softpractice check")
 	}
@@ -64,7 +64,7 @@ func checkProject(ctx context.Context, startDirectory string, args []string, out
 	fmt.Fprintln(output, text(ctx,
 		"\nЛокальные публичные проверки рабочего дерева:",
 		"\nLocal public checks for the working tree:"))
-	if err := localchecks.Run(ctx, repository.Root, checks, output, errorOutput); err != nil {
+	if err := runChecksWithInputs(ctx, client, repository.Root, repository.Root, checks, output, errorOutput); err != nil {
 		return err
 	}
 	fmt.Fprintln(output, text(ctx,
@@ -73,7 +73,7 @@ func checkProject(ctx context.Context, startDirectory string, args []string, out
 	return nil
 }
 
-func runSubmissionChecks(ctx context.Context, repository gitRepository, output, errorOutput io.Writer) error {
+func runSubmissionChecks(ctx context.Context, client *learnercli.Client, repository gitRepository, output, errorOutput io.Writer) error {
 	snapshot, err := prepareCheckSnapshot(repository)
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func runSubmissionChecks(ctx context.Context, repository gitRepository, output, 
 		return err
 	}
 	fmt.Fprintln(output, text(ctx, "\nЛокальные публичные проверки:", "\nLocal public checks:"))
-	if err := localchecks.Run(ctx, snapshot.root, checks, output, errorOutput); err != nil {
+	if err := runChecksWithInputs(ctx, client, repository.Root, snapshot.root, checks, output, errorOutput); err != nil {
 		return err
 	}
 	if err := snapshot.verify(); err != nil {
@@ -130,7 +130,7 @@ func (u learnerUseCases) CheckPublished(ctx context.Context, output, errorOutput
 	fmt.Fprintln(output, text(ctx,
 		"Локальные публичные проверки рабочего дерева:",
 		"Local public checks for the working tree:"))
-	if err := localchecks.Run(ctx, repository.Root, checks, output, errorOutput); err != nil {
+	if err := runChecksWithInputs(ctx, u.client, repository.Root, repository.Root, checks, output, errorOutput); err != nil {
 		return checkFailedError{err}
 	}
 	fmt.Fprintln(output, text(ctx,
