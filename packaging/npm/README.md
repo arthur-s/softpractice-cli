@@ -120,6 +120,13 @@ softpractice set auto-checks true
 run. Unlike `softpractice check`, submission checks require a clean working
 tree and run in an isolated snapshot of `HEAD`.
 
+
+Lessons can declare historical data needed by their checks. The CLI downloads
+and validates those inputs from your own workspace before starting the checks;
+these runs require a network connection. Historical inputs are temporary and
+never enter your project or submission. If the workspace advances during the
+check, update the project and retry.
+
 ## Reviewer questions
 
 When the reviewer asks questions about your solution, `softpractice result`
