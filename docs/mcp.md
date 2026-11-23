@@ -2,16 +2,31 @@
 
 English | [Русский](mcp_ru.md)
 
-Connect the server using the [README instructions](../README.md#mcp-server).
-It works with one linked lesson Git project, selected by its startup directory
-or `--project`. Tool calls cannot switch the project folder.
+MCP is optional: coding agents with terminal access can work directly through
+the CLI and the starter project's root `AGENTS.md` (see
+[Working with an AI agent](../README.md#working-with-an-ai-agent)). Use MCP
+primarily for clients without terminal access or when you want built-in MCP
+confirmations for `submit` and `update`.
 
-Setup (`softpractice mcp setup ...`) works from any folder. The client starts
-`softpractice mcp connect` automatically on macOS, Linux, and Windows. It
+Connect any stdio MCP client using the
+[README instructions](../README.md#mcp-server) (`command`: `softpractice`,
+`args`: `["mcp", "connect"]`, or the built-in `softpractice mcp setup`
+shortcuts for `claude-desktop` / `codex-desktop`). On macOS, Linux, and
+Windows, the client starts `softpractice mcp connect` automatically. It
 initializes and lists tools even without a running lesson server; lesson
-requests explain how to start one while keeping the connection active.
-No system service or startup task is installed.
+requests explain how to start one while keeping the connection active. No
+system service or startup task is installed.
 
+For the built-in desktop shortcuts (`softpractice mcp setup` / `remove`):
+Claude Desktop uses `claude_desktop_config.json` (including the Microsoft Store
+path on Windows); Codex uses `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`)
+with a 180-second tool timeout shared across Codex Desktop, CLI, and the IDE
+extension. Both commands preserve other settings, save the previous file as
+`.bak`, support `--print` to inspect the generated JSON/TOML without writing,
+and make repeated `remove` calls safe.
+
+The lesson server works with one linked lesson Git project, selected by its
+startup directory or `--project`. Tool calls cannot switch the project folder.
 Run `softpractice mcp` in the lesson folder or pass `--project DIR`, and keep
 the terminal open while working on the lesson. To switch projects, stop the
 lesson server and start it in the other folder. The next request uses the new
@@ -21,10 +36,11 @@ uses stdio. Pending confirmations become invalid if the lesson server restarts.
 
 ## What to ask the agent
 
-Write your request in the chat with Codex, Claude, or another MCP client. The
-agent translates it into tool calls; the server accepts structured calls, not
-free-form text or shell commands. You do not need to memorize the tool names.
-Mention “SoftPractice MCP” when the agent has several sources of information.
+Write your request in the chat with your MCP client (for example, Claude
+Desktop, Codex, or another MCP-compatible client). The agent translates it into
+tool calls; the server accepts structured calls, not free-form text or shell
+commands. You do not need to memorize the tool names. Mention “SoftPractice MCP”
+when the agent has several sources of information.
 
 | Example request | Tool |
 | --- | --- |

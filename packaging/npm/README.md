@@ -89,10 +89,10 @@ softpractice update
 | `softpractice submissions` | Show the recent submissions of the lesson |
 | `softpractice update` | Apply the transition to the next lesson, or move to a newer version of the current lesson (replaces only lesson files, never yours; optional until the lesson ends) |
 | `softpractice open` | Open the task, material, or latest result in the browser |
-| `softpractice mcp` | Run the MCP server for Claude Code, Codex, Claude Desktop, and other agents |
-| `softpractice mcp setup codex-desktop` | Configure MCP for Codex Desktop without installing Codex CLI |
-| `softpractice mcp status` | Check the running server and its project |
-| `softpractice mcp remove codex-desktop` | Remove the connection from Codex settings |
+| `softpractice mcp` | Run the optional local MCP lesson server for MCP clients |
+| `softpractice mcp status` | Check the running MCP lesson server and its project |
+| `softpractice mcp setup` | Built-in MCP setup shortcut for `claude-desktop` or `codex-desktop` |
+| `softpractice mcp remove` | Remove the MCP entry from `claude-desktop` or `codex-desktop` settings |
 | `softpractice project restore` | Restore a project from the latest usable revision |
 
 Run `softpractice help <command>` for detailed help.
@@ -147,24 +147,71 @@ softpractice result --wait --timeout 10m --json
 Exit codes: `0` done, `1` error, `2` invalid arguments, `3` the evaluation is
 not ready yet, `4` the evaluation was superseded and will have no result.
 
-## Agent instructions
+## Working with an AI agent
 
-Every starter project already contains `AGENTS.md` and `CLAUDE.md` in its root
-folder, so Codex, Claude Code, and other coding agents pick up the project
-rules automatically. The files are tracked in Git, `softpractice update`
-never replaces them, and they are not part of your submission.
+The primary way to use SoftPractice with any coding agent that has terminal
+access (Claude Code, Codex, Cursor, OpenCode, Antigravity, DeepSeek harness,
+and others) is directly through the CLI and the starter project's root
+`AGENTS.md` / `CLAUDE.md` — no MCP setup is required.
+
+- **Direct CLI workflow:** the agent reads and drives the lesson through
+  standard commands (`status`, `task`, `material`, `hint`, `check`, `submit`,
+  `result`, `update`), using `--json` on supported commands (see
+  [Machine-readable output](#machine-readable-output)).
+- **Built-in project rules:** every starter project already includes `AGENTS.md`
+  and `CLAUDE.md` (`CLAUDE.md` imports `@AGENTS.md`) in its root folder, so
+  coding agents pick up the project workflow and learning boundaries
+  automatically. Both files are tracked in Git, `softpractice update` never
+  replaces them, and they are excluded from your submissions.
+- **What stays with you:** opening new hints on the assignment page, answering
+  reviewer questions on the result page, and deciding when to commit, submit,
+  or apply updates.
+
+### Quickstart prompt
+
+Copy this prompt into your coding agent to install the CLI, sign in, download
+your starter project, and inspect the first task before writing any code:
+
+```text
+Set up SoftPractice CLI and prepare my lesson project:
+1. Install the CLI with `npm install -g @softpractice/softpractice-cli`. If npm is unavailable, install it with Go using the latest release version (`go install -ldflags "-X main.cliVersion=<release-version>" github.com/arthur-s/softpractice-cli/cmd/softpractice@latest`) so `softpractice version` reports a semantic version (not `dev`). Verify with `softpractice --help` and `softpractice version`.
+2. Run `softpractice login`, show me the verification URL and code, and wait until I confirm sign-in in the browser.
+3. Run `softpractice starter` to download the starter project. If no practicum has been started yet, tell me to open https://softpractice.ru/learning, start a practicum, and then retry `softpractice starter`.
+4. Change into the created project directory, read the root `AGENTS.md`, and run `softpractice status` and `softpractice task`.
+5. Briefly summarize the task requirements and stop. Do not write the solution, make a Git commit, or run `softpractice submit` until we discuss the plan.
+```
 
 ## MCP server
 
-`softpractice mcp` connects a coding agent to your SoftPractice lesson:
-reading the task and material, running public checks, submitting a commit, and
-reading the evaluation.
+MCP is an **optional** integration. If your coding agent already has terminal
+access, working directly through the CLI and `AGENTS.md` (see
+[Working with an AI agent](#working-with-an-ai-agent)) is simpler and needs no
+extra setup.
 
-### Configure once, from any folder
+Use `softpractice mcp` primarily when:
 
-Install the CLI (see [Install](#install)), then configure your desktop client.
-For Claude Desktop, install and open the app once before setup.
-You do not need a lesson project yet:
+- your client has **no terminal access** (for example, Claude Desktop); or
+- you want **built-in MCP confirmation dialogs** (MCP elicitation) for `submit`
+  and `update`.
+
+### 1. Connect your client
+
+Install the CLI first (see [Install](#install)). No lesson project is needed for
+this step. Choose the option that fits your client:
+
+**Option A — Prompt your agent (easiest for any coding agent):**
+
+```text
+Register a stdio MCP server named `softpractice` in your MCP configuration:
+- command: `softpractice` (or the full path from `which softpractice` / `where softpractice` if the client does not inherit the shell PATH)
+- args: `["mcp", "connect"]`
+Keep all other settings intact and do not start the lesson server yourself. Tell me if I need to restart the client, and remind me to run `softpractice mcp` in my lesson project directory (or `softpractice mcp --project <path>`).
+```
+
+**Option B — Desktop shortcut (Claude Desktop / Codex Desktop):**
+
+For Claude Desktop, open the app once before running setup. After setup, quit
+the desktop app completely and start it again:
 
 ```bash
 softpractice mcp setup claude-desktop
@@ -172,25 +219,39 @@ softpractice mcp setup claude-desktop
 softpractice mcp setup codex-desktop
 ```
 
-After setup, quit the desktop client completely and start it again to load
-the connection settings.
+To remove the entry later (without stopping a running lesson server):
 
-Setup registers the CLI's absolute executable path and `mcp connect` as the
-launch arguments. It only updates the configuration; it does not start a
-server or install a service that runs when the computer starts. It preserves
-other settings and saves the previous file as `.bak`. Claude Desktop uses
-`claude_desktop_config.json`; on Windows, setup also finds the configuration used by the Microsoft Store version. Codex uses
-`~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and a tool timeout of
-180 seconds. Codex Desktop, CLI, and the IDE extension share these settings.
-No separate Codex CLI installation is needed for desktop setup.
+```bash
+softpractice mcp remove claude-desktop
+# or
+softpractice mcp remove codex-desktop
+```
 
-For manual configuration, append `--print` to either setup command. It prints
-the JSON or TOML entry without writing settings. Replace an existing
-`softpractice` entry rather than adding a duplicate.
+Both commands register the CLI's native executable path and `["mcp", "connect"]`,
+preserve other settings, and back up the previous file as `.bak` (see
+`softpractice help mcp` or the [MCP usage guide](docs/mcp.md) for `--print` and
+config file paths).
 
-### Start the lesson server
+**Option C — Manual setup (universal stdio contract):**
 
-Sign in, then start the server for a Git project downloaded with
+Any MCP-compatible client connects using the same stdio contract (`command`:
+`softpractice` or its full executable path, `args`: `["mcp", "connect"]`; if
+your client lets you configure a tool timeout, `180` seconds is recommended):
+
+```json
+{
+  "mcpServers": {
+    "softpractice": {
+      "command": "softpractice",
+      "args": ["mcp", "connect"]
+    }
+  }
+}
+```
+
+### 2. Start the lesson server
+
+Sign in, then start the local lesson server for a Git project downloaded with
 `softpractice starter` or restored with `softpractice project restore`:
 
 ```bash
@@ -199,97 +260,47 @@ cd /path/to/your/lesson-project
 softpractice mcp
 ```
 
-Or start from any folder with an explicit project:
+Or pass the project path from any folder:
 
 ```bash
 softpractice mcp --project /path/to/your/lesson-project
 ```
 
-Keep this terminal open. The server validates the Git repository and
-SoftPractice project link before accepting connections. It uses the CLI's
-saved sign-in; it never opens a sign-in flow itself.
+Keep this terminal open. Why is a separate lesson server needed?
 
-On macOS, Linux, and Windows, the client automatically starts
-`softpractice mcp connect` and communicates with it over stdio. This connection
-process is separate from the lesson server started in your terminal. It stays
-connected even when no lesson server is running. You can open
-Claude Desktop or Codex Desktop before starting the lesson: tools remain
-listed, and a lesson request explains how to start the server. Start, stop,
-or restart the lesson server without restarting Desktop, then repeat the
-request. Pending confirmations become invalid if the lesson server restarts.
-No system service is installed; the client owns the connection process.
+- **Project scoping and validation:** only `softpractice mcp` startup selects
+  the active Git repository and verifies its SoftPractice project link. MCP
+  tool calls cannot switch folders, and the server uses the CLI's saved sign-in
+  without starting a browser sign-in flow itself.
+- **Decoupled lifecycle:** your MCP client spawns and owns
+  `softpractice mcp connect` over stdio on macOS, Linux, and Windows (no
+  background daemon or startup service is installed). You can start, stop, or
+  restart `softpractice mcp` without restarting your MCP client, then repeat
+  the request (pending confirmations become invalid on restart).
+- **Local-only security:** the lesson server listens only on `127.0.0.1:39473`
+  (not an HTTP URL) and requires a random per-run key saved in the CLI's user
+  configuration folder. Both processes must run on the same computer under the
+  same user and share `SOFTPRACTICE_CONFIG_DIR` if it is set.
 
-The lesson server listens on `127.0.0.1:39473`. Connections require a random
-per-run key saved in the CLI's user configuration folder. Both processes
-must run on the same computer under the same user and use the same
-`SOFTPRACTICE_CONFIG_DIR` if that environment variable is set. This address
-is not an HTTP URL.
+Only one lesson server can run at a time. To switch projects, stop it with
+Ctrl+C and start it in the other lesson folder — no reconfiguration or client
+restart is needed. `softpractice mcp` always starts the local server, including
+with redirected stdin or in the background; setup never accepts `--project`.
 
-Only one lesson server can run on this computer at a time. To switch projects,
-stop it with Ctrl+C and start it in the other lesson folder. The next request
-uses the new project. Setup does not need to be repeated.
-
-### Claude Code and Codex CLI
-
-To use the same manually started server:
-
-```bash
-claude mcp add --transport stdio --scope user softpractice -- softpractice mcp connect
-# or, if Codex Desktop setup has not already configured it:
-codex mcp add softpractice -- softpractice mcp connect
-```
-
-If the client cannot find `softpractice`, use the executable's full path.
-See the [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp)
-and [Codex MCP documentation](https://developers.openai.com/codex/mcp).
-
-`softpractice mcp` always starts the local server, including with redirected
-stdin or in the background. Only server startup selects the project. Setup
-registers the connection command and does not accept `--project`.
-The lesson server must be running for tools to work with the lesson.
-
-### Checking the server
-
-From any folder, check which server is running:
+Check which lesson server is running from any folder (no project or sign-in
+needed):
 
 ```bash
 softpractice mcp status
 softpractice mcp status --json
 ```
 
-The command checks a live connection and shows the lesson folder, PID,
-local address, and CLI version. A stopped server returns `not_running`;
-a key file left after a crash is not treated as proof of a running server.
-No lesson project or sign-in is needed. This reports the lesson server,
-not the client connection process. Lesson information is available through
-`softpractice status` and, while the lesson server is running, the MCP
-`status` tool.
+`status` checks a live connection (a stale key file is not treated as running;
+a stopped server returns `not_running`) and reports the lesson server, not the
+client's `mcp connect` process. Press Ctrl+C in the server's terminal to stop
+it.
 
-### Stopping the server and removing the connection
-
-Press Ctrl+C in the server's terminal to stop the lesson server. The MCP
-connection remains active, but lesson requests ask you to start the lesson
-server. Start it again and repeat the request; no client restart is
-needed.
-
-To remove the client connection, run from any folder:
-
-```bash
-softpractice mcp remove claude-desktop
-# or
-softpractice mcp remove codex-desktop
-```
-
-This removes only the SoftPractice entry, preserves other settings, and saves
-the previous file as `.bak`. Repeating the command is safe: missing entries
-or files are left untouched. Restart the client to apply the change. Codex
-shares these settings between Desktop, CLI, and the IDE extension; project
-settings may override them.
-
-Removing the connection does not stop the lesson server. To reconnect,
-run the corresponding `softpractice mcp setup` command again.
-
-### Using the server
+### 3. Using the server
 
 The server exposes nine tools. Ask the agent in ordinary language; it chooses
 the tool and passes structured arguments. These are MCP tool names, not slash
